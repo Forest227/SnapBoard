@@ -11,6 +11,7 @@ CONTENTS_DIR="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 INFO_PLIST_TEMPLATE="$PROJECT_ROOT/Packaging/$APP_NAME-Info.plist"
+APP_ICON="$PROJECT_ROOT/Packaging/AppIcon.icns"
 
 swift build -c release --package-path "$PROJECT_ROOT" >/dev/null
 BIN_DIR="$(swift build -c release --show-bin-path --package-path "$PROJECT_ROOT")"
@@ -26,6 +27,9 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$EXECUTABLE_PATH" "$MACOS_DIR/$APP_NAME"
 cp "$INFO_PLIST_TEMPLATE" "$CONTENTS_DIR/Info.plist"
+if [[ -f "$APP_ICON" ]]; then
+  cp "$APP_ICON" "$RESOURCES_DIR/AppIcon.icns"
+fi
 chmod +x "$MACOS_DIR/$APP_NAME"
 
 codesign --force --sign - "$APP_BUNDLE" >/dev/null

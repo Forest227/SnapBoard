@@ -5,6 +5,9 @@ import SwiftUI
 final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelegate {
     private let image: NSImage
     private let onClose: (PinnedScreenshotWindowController) -> Void
+    private var currentScale: CGFloat = 1.0
+    private let minScale: CGFloat = 0.25
+    private let maxScale: CGFloat = 3.0
 
     init(image: NSImage, onClose: @escaping (PinnedScreenshotWindowController) -> Void) {
         self.image = image
@@ -39,6 +42,59 @@ final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelega
         window?.ignoresMouseEvents = enabled
     }
 
+    func zoomIn() {
+        setScale(currentScale * 1.2)
+    }
+
+    func zoomOut() {
+        setScale(currentScale / 1.2)
+    }
+
+    func resetZoom() {
+        setScale(1.0)
+    }
+
+    private func setScale(_ scale: CGFloat) {
+        let newScale = min(max(scale, minScale), maxScale)
+        guard newScale != currentScale else { return }
+
+        currentScale = newScale
+
+        guard let window = window else { return }
+
+        let imageSize = image.size
+        let newWidth = imageSize.width * currentScale + 24
+        let newHeight = imageSize.height * currentScale + 24
+
+        let currentFrame = window.frame
+        let newSize = CGSize(width: max(newWidth, 220), height: max(newHeight, 160))
+
+        let newOrigin = CGPoint(
+            x: currentFrame.midX - newSize.width / 2,
+            y: currentFrame.midY - newSize.height / 2
+        )
+
+        let newFrame = CGRect(origin: newOrigin, size: newSize)
+
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.2
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            window.animator().setFrame(newFrame, display: true)
+        })
+
+        if let hostingView = window.contentView as? NSHostingView<PinnedScreenshotView> {
+            hostingView.rootView = PinnedScreenshotView(
+                image: image,
+                scale: currentScale,
+                onCopy: { [weak self] in self?.copyImage() },
+                onClose: { [weak window] in window?.performClose(nil) },
+                onZoomIn: { [weak self] in self?.zoomIn() },
+                onZoomOut: { [weak self] in self?.zoomOut() },
+                onResetZoom: { [weak self] in self?.resetZoom() }
+            )
+        }
+    }
+
     private func configureWindow(_ window: NSWindow, initialSize: CGSize) {
         window.delegate = self
         window.isReleasedWhenClosed = false
@@ -57,12 +113,45 @@ final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelega
 
         let rootView = PinnedScreenshotView(
             image: image,
+            scale: currentScale,
             onCopy: { [weak self] in self?.copyImage() },
-            onClose: { [weak window] in window?.performClose(nil) }
+            onClose: { [weak window] in window?.performClose(nil) },
+            onZoomIn: { [weak self] in self?.zoomIn() },
+            onZoomOut: { [weak self] in self?.zoomOut() },
+            onResetZoom: { [weak self] in self?.resetZoom() }
         )
 
         window.contentView = NSHostingView(rootView: rootView)
         positionWindow(window, size: initialSize)
+
+        addScrollMonitor(to: window)
+    }
+
+    private func addScrollMonitor(to window: NSWindow) {
+        NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+            guard let self = self,
+                  let window = self.window,
+                  window.isKeyWindow else {
+                return event
+            }
+
+            // Check if mouse is over this window
+            let mouseLocation = NSEvent.mouseLocation
+            let windowFrame = window.frame
+            guard windowFrame.contains(mouseLocation) else {
+                return event
+            }
+
+            let deltaY = event.scrollingDeltaY
+            if abs(deltaY) > 0.5 {
+                if deltaY > 0 {
+                    self.zoomIn()
+                } else {
+                    self.zoomOut()
+                }
+            }
+            return nil
+        }
     }
 
     private func positionWindow(_ window: NSWindow, size: CGSize) {
@@ -104,8 +193,14 @@ final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelega
 
 private struct PinnedScreenshotView: View {
     let image: NSImage
+    let scale: CGFloat
     let onCopy: () -> Void
     let onClose: () -> Void
+    let onZoomIn: () -> Void
+    let onZoomOut: () -> Void
+    let onResetZoom: () -> Void
+
+    @State private var isHovering = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -122,11 +217,21 @@ private struct PinnedScreenshotView: View {
             }
             .padding(12)
 
-            HStack(spacing: 8) {
-                floatingButton(symbol: "doc.on.doc", action: onCopy)
-                floatingButton(symbol: "xmark", action: onClose)
+            VStack(alignment: .trailing, spacing: 8) {
+                HStack(spacing: 8) {
+                    floatingButton(symbol: "minus.magnifyingglass", action: onZoomOut)
+                    floatingButton(symbol: "plus.magnifyingglass", action: onZoomIn)
+                    floatingButton(symbol: "arrow.counterclockwise", action: onResetZoom)
+                }
+
+                HStack(spacing: 8) {
+                    floatingButton(symbol: "doc.on.doc", action: onCopy)
+                    floatingButton(symbol: "xmark", action: onClose)
+                }
             }
             .padding(18)
+            .opacity(isHovering ? 1 : 0)
+            .animation(.smooth(duration: 0.2), value: isHovering)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
@@ -145,6 +250,9 @@ private struct PinnedScreenshotView: View {
                 .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
         )
         .padding(6)
+        .onHover { hovering in
+            isHovering = hovering
+        }
     }
 
     private func floatingButton(symbol: String, action: @escaping () -> Void) -> some View {

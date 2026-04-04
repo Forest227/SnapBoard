@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import SwiftUI
@@ -11,10 +12,12 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
     private let onCopy: (NSImage) -> Void
     private let onClose: () -> Void
     private let layout: ScreenshotEditorLayout
+    private var keyMonitor: Any?
 
     init(
         image: NSImage,
         sourceRect: CGRect?,
+        existingWindow: NSWindow? = nil,
         onPin: @escaping (NSImage) -> Void,
         onCopy: @escaping (NSImage) -> Void,
         onClose: @escaping () -> Void
@@ -23,17 +26,18 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
         self.onPin = onPin
         self.onCopy = onCopy
         self.onClose = onClose
-
         layout = Self.makeLayout(for: image.size, sourceRect: sourceRect)
-        let window = ScreenshotEditorWindow(
-            contentRect: CGRect(origin: .zero, size: layout.windowSize),
+
+        let window = existingWindow ?? ScreenshotEditorWindow(
+            contentRect: layout.screenFrame,
             styleMask: .borderless,
             backing: .buffered,
             defer: false
         )
 
         super.init(window: window)
-        configureWindow(window, sourceRect: sourceRect)
+        configureWindow(window)
+        installKeyMonitor()
     }
 
     @available(*, unavailable)
@@ -42,18 +46,26 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
     }
 
     func windowWillClose(_ notification: Notification) {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
         onClose()
     }
 
-    private func configureWindow(_ window: NSWindow, sourceRect: CGRect?) {
+    private func configureWindow(_ window: NSWindow) {
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = false
-        window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.level = .screenSaver
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         window.ignoresMouseEvents = false
+        window.setFrame(layout.screenFrame, display: true)
+
+        // Apply theme
+        ThemeManager.shared.applyTheme(to: window)
 
         let rootView = ScreenshotEditorRootView(
             viewModel: viewModel,
@@ -74,9 +86,58 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
                 self?.extractTextFromImage()
             }
         )
+        .preferredColorScheme(ThemeManager.shared.currentTheme.colorScheme)
 
         window.contentView = NSHostingView(rootView: rootView)
-        positionWindow(window, sourceRect: sourceRect)
+    }
+
+    private func installKeyMonitor() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.window?.isKeyWindow == true else { return event }
+
+            if event.keyCode == UInt16(kVK_Escape) {
+                self.close()
+                return nil
+            }
+
+            let commandFlags: NSEvent.ModifierFlags = [.command]
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == commandFlags,
+               event.charactersIgnoringModifiers?.lowercased() == "z" {
+                self.viewModel.undoLastAnnotation()
+                return nil
+            }
+
+            // Tool switching shortcuts (1-7)
+            if let character = event.charactersIgnoringModifiers?.first {
+                switch character {
+                case "1":
+                    self.viewModel.activeTool = .rectangle
+                    return nil
+                case "2":
+                    self.viewModel.activeTool = .highlight
+                    return nil
+                case "3":
+                    self.viewModel.activeTool = .text
+                    return nil
+                case "4":
+                    self.viewModel.activeTool = .arrow
+                    return nil
+                case "5":
+                    self.viewModel.activeTool = .line
+                    return nil
+                case "6":
+                    self.viewModel.activeTool = .pen
+                    return nil
+                case "7":
+                    self.viewModel.activeTool = .mosaic
+                    return nil
+                default:
+                    break
+                }
+            }
+
+            return event
+        }
     }
 
     private func completeEditing() {
@@ -104,6 +165,8 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
     }
 
     private func extractTextFromImage() {
+        guard !viewModel.isExtractingText else { return }
+
         let image = viewModel.renderedImage()
         guard let cgImage = image.cgImageRepresentation else {
             NSSound.beep()
@@ -111,12 +174,14 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
             return
         }
 
+        viewModel.isExtractingText = true
         viewModel.showToast("正在提取文字…")
 
         Task.detached(priority: .userInitiated) {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
 
             do {
                 let handler = VNImageRequestHandler(cgImage: cgImage)
@@ -127,6 +192,7 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
                 await MainActor.run {
+                    self.viewModel.isExtractingText = false
                     guard !text.isEmpty else {
                         NSSound.beep()
                         self.viewModel.showToast("未识别到文字")
@@ -135,10 +201,11 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
 
                     ScreenshotEditorFileIO.copyTextToPasteboard(text)
                     self.viewModel.showToast("文字已复制到剪贴板")
-                    RecognizedTextPresenter.present(text: text)
+                    RecognizedTextPresenter.present(text: text, parentWindow: self.window)
                 }
             } catch {
                 await MainActor.run {
+                    self.viewModel.isExtractingText = false
                     NSSound.beep()
                     self.viewModel.showToast("提取失败")
                 }
@@ -146,128 +213,136 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
         }
     }
 
-    private func positionWindow(_ window: NSWindow, sourceRect: CGRect?) {
-        let targetScreen = screen(for: sourceRect) ?? screenContainingMouse() ?? NSScreen.main ?? NSScreen.screens.first
-        let visibleFrame = targetScreen?.visibleFrame ?? CGRect(origin: .zero, size: layout.windowSize)
-
-        let desiredImageOrigin = desiredImageFrameOrigin(
-            for: sourceRect,
-            visibleFrame: visibleFrame,
-            imageSize: layout.displayImageSize
-        )
-
-        let imageInsets = layout.imageInsets
-        let proposedOrigin: CGPoint
-        switch layout.toolbarPlacement {
-        case .below:
-            proposedOrigin = CGPoint(
-                x: desiredImageOrigin.x - imageInsets.x,
-                y: desiredImageOrigin.y - imageInsets.y
-            )
-
-        case .above:
-            proposedOrigin = CGPoint(
-                x: desiredImageOrigin.x - imageInsets.x,
-                y: desiredImageOrigin.y - layout.contentPadding
-            )
-        }
-
-        let clampedOrigin = CGPoint(
-            x: clampedAxisOrigin(
-                proposedOrigin.x,
-                minBound: visibleFrame.minX + 8,
-                maxBound: visibleFrame.maxX - layout.windowSize.width - 8
-            ),
-            y: clampedAxisOrigin(
-                proposedOrigin.y,
-                minBound: visibleFrame.minY + 8,
-                maxBound: visibleFrame.maxY - layout.windowSize.height - 8
-            )
-        )
-
-        window.setFrameOrigin(clampedOrigin)
-    }
-
-    private func clampedAxisOrigin(_ value: CGFloat, minBound: CGFloat, maxBound: CGFloat) -> CGFloat {
-        let resolvedMaxBound = max(minBound, maxBound)
-        return min(max(value, minBound), resolvedMaxBound)
-    }
-
-    private func desiredImageFrameOrigin(
-        for sourceRect: CGRect?,
-        visibleFrame: CGRect,
-        imageSize: CGSize
-    ) -> CGPoint {
-        guard let sourceRect else {
-            return CGPoint(
-                x: visibleFrame.midX - (imageSize.width / 2),
-                y: visibleFrame.midY - (imageSize.height / 2)
-            )
-        }
-
-        return CGPoint(
-            x: sourceRect.midX - (imageSize.width / 2),
-            y: sourceRect.midY - (imageSize.height / 2)
-        )
-    }
-
-    private func screen(for sourceRect: CGRect?) -> NSScreen? {
-        guard let sourceRect else { return nil }
-
-        return NSScreen.screens.first { screen in
-            screen.frame.intersects(sourceRect)
-        }
-    }
-
-    private func screenContainingMouse() -> NSScreen? {
-        let mouseLocation = NSEvent.mouseLocation
-        return NSScreen.screens.first { screen in
-            screen.frame.contains(mouseLocation)
-        }
-    }
-
     private static func makeLayout(for imageSize: CGSize, sourceRect: CGRect?) -> ScreenshotEditorLayout {
         let targetScreen = NSScreen.screens.first { screen in
             guard let sourceRect else { return false }
             return screen.frame.intersects(sourceRect)
-        } ?? NSScreen.main ?? NSScreen.screens.first
+        } ?? NSScreen.main ?? NSScreen.screens.first ?? NSScreen.screens[0]
 
-        let visibleFrame = targetScreen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
-        let contentPadding: CGFloat = 12
-        let toolbarHeight: CGFloat = 58
-        let spacing: CGFloat = 12
+        let screenFrame = targetScreen.frame
+        let visibleFrame = targetScreen.visibleFrame
+        let outerMargin: CGFloat = 8
+        let toolbarWidth: CGFloat = min(max(544, imageSize.width * 0.52), visibleFrame.width - 24)
+        let toolbarHeight: CGFloat = 56
+        let toolbarSpacing: CGFloat = 14
 
-        let maxImageWidth = max(visibleFrame.width - (contentPadding * 2) - 16, 240)
-        let maxImageHeight = max(visibleFrame.height - toolbarHeight - spacing - (contentPadding * 2) - 20, 180)
-        let widthScale = maxImageWidth / max(imageSize.width, 1)
-        let heightScale = maxImageHeight / max(imageSize.height, 1)
-        let scale = min(1, widthScale, heightScale)
+        let imageGlobalRect: CGRect
+        let displayScale: CGFloat
 
-        let displayImageSize = CGSize(
-            width: max(imageSize.width * scale, 180),
-            height: max(imageSize.height * scale, 120)
-        )
+        if let sourceRect {
+            let clampedSourceRect = sourceRect.intersection(screenFrame)
+            imageGlobalRect = (clampedSourceRect.isNull || clampedSourceRect.isEmpty ? sourceRect : clampedSourceRect).integral
+            displayScale = imageGlobalRect.width / max(imageSize.width, 1)
+        } else {
+            let maxImageWidth = max(screenFrame.width - 32, 200)
+            let maxImageHeight = max(screenFrame.height - 110, 140)
+            let widthScale = maxImageWidth / max(imageSize.width, 1)
+            let heightScale = maxImageHeight / max(imageSize.height, 1)
+            let scale = min(1, widthScale, heightScale)
 
-        let toolbarWidth = min(
-            max(500, min(displayImageSize.width, 620)),
-            visibleFrame.width - 24
-        )
-        let contentWidth = max(displayImageSize.width, toolbarWidth) + (contentPadding * 2)
-        let contentHeight = displayImageSize.height + toolbarHeight + spacing + (contentPadding * 2)
+            let displayImageSize = CGSize(
+                width: max(imageSize.width * scale, 80),
+                height: max(imageSize.height * scale, 60)
+            )
 
-        let sourceMinY = sourceRect?.minY ?? visibleFrame.midY
-        let toolbarPlacement: ScreenshotEditorLayout.ToolbarPlacement =
-            (sourceMinY - toolbarHeight - spacing - 24 >= visibleFrame.minY) ? .below : .above
+            imageGlobalRect = resolvedImageGlobalRect(
+                sourceRect: nil,
+                displayImageSize: displayImageSize,
+                screenFrame: screenFrame,
+                margin: outerMargin
+            )
+            displayScale = displayImageSize.width / max(imageSize.width, 1)
+        }
 
-        return ScreenshotEditorLayout(
-            displayImageSize: displayImageSize,
+        let toolbarGlobalRect = resolvedToolbarGlobalRect(
+            imageRect: imageGlobalRect,
+            visibleFrame: visibleFrame,
             toolbarWidth: toolbarWidth,
             toolbarHeight: toolbarHeight,
-            contentPadding: contentPadding,
-            spacing: spacing,
-            toolbarPlacement: toolbarPlacement,
-            windowSize: CGSize(width: contentWidth, height: contentHeight)
+            spacing: toolbarSpacing,
+            margin: outerMargin
         )
+
+        return ScreenshotEditorLayout(
+            screenFrame: screenFrame,
+            screenSize: screenFrame.size,
+            imageRect: localRect(fromGlobalRect: imageGlobalRect, in: screenFrame),
+            toolbarRect: localRect(fromGlobalRect: toolbarGlobalRect, in: screenFrame),
+            displayScale: max(displayScale, 0.01)
+        )
+    }
+
+    private static func resolvedImageGlobalRect(
+        sourceRect: CGRect?,
+        displayImageSize: CGSize,
+        screenFrame: CGRect,
+        margin: CGFloat
+    ) -> CGRect {
+        let origin: CGPoint
+        if let sourceRect {
+            origin = CGPoint(
+                x: sourceRect.minX,
+                y: sourceRect.maxY - displayImageSize.height
+            )
+        } else {
+            origin = CGPoint(
+                x: screenFrame.midX - (displayImageSize.width / 2),
+                y: screenFrame.midY - (displayImageSize.height / 2)
+            )
+        }
+
+        return CGRect(
+            x: clampedAxis(origin.x, minBound: screenFrame.minX + margin, maxBound: screenFrame.maxX - displayImageSize.width - margin),
+            y: clampedAxis(origin.y, minBound: screenFrame.minY + margin, maxBound: screenFrame.maxY - displayImageSize.height - margin),
+            width: displayImageSize.width,
+            height: displayImageSize.height
+        ).integral
+    }
+
+    private static func resolvedToolbarGlobalRect(
+        imageRect: CGRect,
+        visibleFrame: CGRect,
+        toolbarWidth: CGFloat,
+        toolbarHeight: CGFloat,
+        spacing: CGFloat,
+        margin: CGFloat
+    ) -> CGRect {
+        let x = clampedAxis(
+            imageRect.midX - (toolbarWidth / 2),
+            minBound: visibleFrame.minX + margin,
+            maxBound: visibleFrame.maxX - toolbarWidth - margin
+        )
+
+        let belowY = imageRect.minY - toolbarHeight - spacing
+        if belowY >= visibleFrame.minY + margin {
+            return CGRect(x: x, y: belowY, width: toolbarWidth, height: toolbarHeight).integral
+        }
+
+        let aboveY = imageRect.maxY + spacing
+        if aboveY + toolbarHeight <= visibleFrame.maxY - margin {
+            return CGRect(x: x, y: aboveY, width: toolbarWidth, height: toolbarHeight).integral
+        }
+
+        let fallbackY = clampedAxis(
+            visibleFrame.minY + margin,
+            minBound: visibleFrame.minY + margin,
+            maxBound: visibleFrame.maxY - toolbarHeight - margin
+        )
+        return CGRect(x: x, y: fallbackY, width: toolbarWidth, height: toolbarHeight).integral
+    }
+
+    private static func localRect(fromGlobalRect rect: CGRect, in screenFrame: CGRect) -> CGRect {
+        CGRect(
+            x: rect.minX - screenFrame.minX,
+            y: screenFrame.maxY - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
+    }
+
+    private static func clampedAxis(_ value: CGFloat, minBound: CGFloat, maxBound: CGFloat) -> CGFloat {
+        let resolvedMaxBound = max(minBound, maxBound)
+        return min(max(value, minBound), resolvedMaxBound)
     }
 }
 
@@ -277,34 +352,11 @@ private final class ScreenshotEditorWindow: NSWindow {
 }
 
 private struct ScreenshotEditorLayout {
-    enum ToolbarPlacement {
-        case below
-        case above
-    }
-
-    let displayImageSize: CGSize
-    let toolbarWidth: CGFloat
-    let toolbarHeight: CGFloat
-    let contentPadding: CGFloat
-    let spacing: CGFloat
-    let toolbarPlacement: ToolbarPlacement
-    let windowSize: CGSize
-
-    var imageInsets: CGPoint {
-        switch toolbarPlacement {
-        case .below:
-            CGPoint(
-                x: (windowSize.width - displayImageSize.width) / 2,
-                y: contentPadding + toolbarHeight + spacing
-            )
-
-        case .above:
-            CGPoint(
-                x: (windowSize.width - displayImageSize.width) / 2,
-                y: contentPadding
-            )
-        }
-    }
+    let screenFrame: CGRect
+    let screenSize: CGSize
+    let imageRect: CGRect
+    let toolbarRect: CGRect
+    let displayScale: CGFloat
 }
 
 @MainActor
@@ -313,8 +365,14 @@ private final class ScreenshotEditorViewModel: ObservableObject {
     let pixelatedPreviewImage: NSImage?
 
     @Published var activeTool: ScreenshotEditorTool = .rectangle
-    @Published var selectedColor: ScreenshotAnnotationColor = .green
+    @Published var selectedColor: ScreenshotAnnotationColor = .red
+    @Published var selectedLineStyle: RectangleLineStyle = .solid
+    @Published var textFontSize: CGFloat = 24
+    @Published var textIsBold: Bool = false
+    @Published var textIsItalic: Bool = false
+    @Published var textIsUnderline: Bool = false
     @Published var annotations: [ScreenshotEditorAnnotation] = []
+    @Published var isExtractingText = false
     @Published var toastMessage: String?
 
     private var toastDismissWorkItem: DispatchWorkItem?
@@ -355,8 +413,11 @@ private final class ScreenshotEditorViewModel: ObservableObject {
 
 private enum ScreenshotEditorTool: String, CaseIterable, Identifiable {
     case rectangle
+    case highlight
     case text
     case arrow
+    case line
+    case pen
     case mosaic
 
     var id: String { rawValue }
@@ -365,10 +426,16 @@ private enum ScreenshotEditorTool: String, CaseIterable, Identifiable {
         switch self {
         case .rectangle:
             "square"
+        case .highlight:
+            "rectangle.and.pencil.and.ellipsis"
         case .text:
-            "textformat"
+            "t.square"
         case .arrow:
             "arrow.up.right"
+        case .line:
+            "line.diagonal"
+        case .pen:
+            "pencil"
         case .mosaic:
             "square.grid.3x3.fill"
         }
@@ -378,10 +445,16 @@ private enum ScreenshotEditorTool: String, CaseIterable, Identifiable {
         switch self {
         case .rectangle:
             "线框"
+        case .highlight:
+            "高亮"
         case .text:
             "文字"
         case .arrow:
             "箭头"
+        case .line:
+            "直线"
+        case .pen:
+            "画笔"
         case .mosaic:
             "马赛克"
         }
@@ -391,48 +464,80 @@ private enum ScreenshotEditorTool: String, CaseIterable, Identifiable {
         switch self {
         case .mosaic:
             false
-        case .rectangle, .text, .arrow:
+        case .rectangle, .highlight, .text, .arrow, .line, .pen:
             true
+        }
+    }
+
+    var shortcutKey: String {
+        switch self {
+        case .rectangle: "1"
+        case .highlight: "2"
+        case .text: "3"
+        case .arrow: "4"
+        case .line: "5"
+        case .pen: "6"
+        case .mosaic: "7"
         }
     }
 }
 
 private enum ScreenshotAnnotationColor: String, CaseIterable, Identifiable {
-    case green
     case red
+    case green
     case orange
     case yellow
     case blue
+    case purple
+    case pink
+    case white
+    case black
 
     var id: String { rawValue }
 
     var swiftUIColor: Color {
         switch self {
-        case .green:
-            Color(nsColor: .systemGreen)
-        case .red:
-            Color(nsColor: .systemRed)
-        case .orange:
-            Color(nsColor: .systemOrange)
-        case .yellow:
-            Color(nsColor: .systemYellow)
-        case .blue:
-            Color(nsColor: .systemBlue)
+        case .red: Color(nsColor: .systemRed)
+        case .green: Color(nsColor: .systemGreen)
+        case .orange: Color(nsColor: .systemOrange)
+        case .yellow: Color(nsColor: .systemYellow)
+        case .blue: Color(nsColor: .systemBlue)
+        case .purple: Color(nsColor: .systemPurple)
+        case .pink: Color(nsColor: .systemPink)
+        case .white: Color.white
+        case .black: Color.black
         }
     }
 
     var nsColor: NSColor {
         switch self {
-        case .green:
-            .systemGreen
-        case .red:
-            .systemRed
-        case .orange:
-            .systemOrange
-        case .yellow:
-            .systemYellow
-        case .blue:
-            .systemBlue
+        case .red: .systemRed
+        case .green: .systemGreen
+        case .orange: .systemOrange
+        case .yellow: .systemYellow
+        case .blue: .systemBlue
+        case .purple: .systemPurple
+        case .pink: .systemPink
+        case .white: .white
+        case .black: .black
+        }
+    }
+
+    static var highlightColors: [ScreenshotAnnotationColor] {
+        [.yellow, .green, .orange, .red, .blue, .purple, .pink]
+    }
+}
+
+private enum RectangleLineStyle {
+    case solid
+    case dashed
+    case double
+
+    var dashPattern: [CGFloat]? {
+        switch self {
+        case .solid: nil
+        case .dashed: [8, 4]
+        case .double: nil
         }
     }
 }
@@ -442,6 +547,14 @@ private struct RectangleAnnotation {
     let rect: CGRect
     let color: ScreenshotAnnotationColor
     let lineWidth: CGFloat
+    let lineStyle: RectangleLineStyle
+}
+
+private struct HighlightAnnotation {
+    let id = UUID()
+    let rect: CGRect
+    let color: ScreenshotAnnotationColor
+    let opacity: CGFloat
 }
 
 private struct ArrowAnnotation {
@@ -452,12 +565,30 @@ private struct ArrowAnnotation {
     let lineWidth: CGFloat
 }
 
+private struct LineAnnotation {
+    let id = UUID()
+    let start: CGPoint
+    let end: CGPoint
+    let color: ScreenshotAnnotationColor
+    let lineWidth: CGFloat
+}
+
+private struct PenAnnotation {
+    let id = UUID()
+    let points: [CGPoint]
+    let color: ScreenshotAnnotationColor
+    let lineWidth: CGFloat
+}
+
 private struct TextAnnotation {
     let id = UUID()
     let origin: CGPoint
     let text: String
     let color: ScreenshotAnnotationColor
     let fontSize: CGFloat
+    let isBold: Bool
+    let isItalic: Bool
+    let isUnderline: Bool
 }
 
 private struct MosaicAnnotation {
@@ -468,20 +599,22 @@ private struct MosaicAnnotation {
 
 private enum ScreenshotEditorAnnotation: Identifiable {
     case rectangle(RectangleAnnotation)
+    case highlight(HighlightAnnotation)
     case arrow(ArrowAnnotation)
+    case line(LineAnnotation)
+    case pen(PenAnnotation)
     case text(TextAnnotation)
     case mosaic(MosaicAnnotation)
 
     var id: UUID {
         switch self {
-        case let .rectangle(annotation):
-            annotation.id
-        case let .arrow(annotation):
-            annotation.id
-        case let .text(annotation):
-            annotation.id
-        case let .mosaic(annotation):
-            annotation.id
+        case let .rectangle(annotation): annotation.id
+        case let .highlight(annotation): annotation.id
+        case let .arrow(annotation): annotation.id
+        case let .line(annotation): annotation.id
+        case let .pen(annotation): annotation.id
+        case let .text(annotation): annotation.id
+        case let .mosaic(annotation): annotation.id
         }
     }
 }
@@ -491,7 +624,14 @@ private struct DraftArrow {
     let end: CGPoint
 }
 
+private struct DraftLine {
+    let start: CGPoint
+    let end: CGPoint
+}
+
 private struct ScreenshotEditorRootView: View {
+    private static let selectionFrameColor = Color(red: 0.2, green: 0.86, blue: 0.56)
+
     @ObservedObject var viewModel: ScreenshotEditorViewModel
     let layout: ScreenshotEditorLayout
     let onClose: () -> Void
@@ -501,56 +641,91 @@ private struct ScreenshotEditorRootView: View {
     let onExtractText: () -> Void
 
     @State private var draftRectangle: CGRect?
+    @State private var draftHighlight: CGRect?
     @State private var draftArrow: DraftArrow?
+    @State private var draftLine: DraftLine?
+    @State private var draftPenPoints: [CGPoint] = []
     @State private var draftMosaicPoints: [CGPoint] = []
     @State private var draftTextOrigin: CGPoint?
     @State private var draftText = ""
     @FocusState private var isTextFieldFocused: Bool
+    @State private var showToolShortcuts: Bool = false
 
     private let rectangleLineWidth: CGFloat = 4
     private let arrowLineWidth: CGFloat = 4
-    private let textFontSize: CGFloat = 24
+    private let lineLineWidth: CGFloat = 4
+    private let penLineWidth: CGFloat = 4
     private let mosaicBrushSize: CGFloat = 28
+    private let highlightOpacity: CGFloat = 0.35
 
     var body: some View {
-        VStack(spacing: layout.spacing) {
-            if layout.toolbarPlacement == .above {
-                toolbar
-            }
+        ZStack(alignment: .topLeading) {
+            ScreenshotEditorBackdropView(
+                screenSize: layout.screenSize,
+                imageRect: layout.imageRect
+            )
 
             imageStage
+                .frame(width: layout.imageRect.width, height: layout.imageRect.height)
+                .offset(x: layout.imageRect.minX, y: layout.imageRect.minY)
 
-            if layout.toolbarPlacement == .below {
-                toolbar
+            toolbar
+                .fixedSize()
+                .frame(width: layout.toolbarRect.width, height: layout.toolbarRect.height)
+                .offset(x: layout.toolbarRect.minX, y: layout.toolbarRect.minY)
+
+            if let toastMessage = viewModel.toastMessage {
+                ToastView(message: toastMessage)
+                    .padding(.top, 18)
+                    .padding(.trailing, 18)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .top).combined(with: .opacity).animation(.spring(response: 0.35, dampingFraction: 0.75)),
+                        removal: .move(edge: .top).combined(with: .opacity).animation(.smooth(duration: 0.2))
+                    ))
+            }
+
+            if showToolShortcuts {
+                ToolShortcutsOverlay()
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.9).combined(with: .opacity).animation(.spring(response: 0.4, dampingFraction: 0.75)),
+                        removal: .scale(scale: 0.95).combined(with: .opacity).animation(.smooth(duration: 0.2))
+                    ))
             }
         }
-        .padding(layout.contentPadding)
-        .frame(width: layout.windowSize.width, height: layout.windowSize.height)
+        .frame(width: layout.screenSize.width, height: layout.screenSize.height)
         .background(Color.clear)
         .onChange(of: viewModel.activeTool) { _ in
             commitTextDraftIfNeeded()
+        }
+        .onAppear {
+            withAnimation(.smooth(duration: 0.25).delay(0.05)) {
+                showToolShortcuts = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+                withAnimation(.smooth(duration: 0.25)) {
+                    showToolShortcuts = false
+                }
+            }
         }
     }
 
     private var imageStage: some View {
         ZStack(alignment: .topLeading) {
-            Image(nsImage: viewModel.image)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: layout.displayImageSize.width, height: layout.displayImageSize.height)
+            Color.clear
+                .frame(width: layout.imageRect.width, height: layout.imageRect.height)
 
             if let pixelatedPreviewImage = viewModel.pixelatedPreviewImage,
                hasVisibleMosaicContent {
                 Image(nsImage: pixelatedPreviewImage)
                     .resizable()
                     .interpolation(.none)
-                    .frame(width: layout.displayImageSize.width, height: layout.displayImageSize.height)
+                    .frame(width: layout.imageRect.width, height: layout.imageRect.height)
                     .mask(
                         MosaicMaskView(
                             annotations: viewModel.annotations,
                             draftPoints: draftMosaicPoints,
                             imageSize: viewModel.image.size,
-                            displaySize: layout.displayImageSize
+                            displaySize: layout.imageRect.size
                         )
                     )
             }
@@ -560,33 +735,21 @@ private struct ScreenshotEditorRootView: View {
             if let draftTextOrigin {
                 draftTextEditor(at: draftTextOrigin)
             }
-
-            if let toastMessage = viewModel.toastMessage {
-                HStack {
-                    Spacer()
-                    Text(toastMessage)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.black.opacity(0.7), in: Capsule())
-                }
-                .padding(16)
-            }
         }
-        .frame(width: layout.displayImageSize.width, height: layout.displayImageSize.height)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.98))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.82), lineWidth: 1.5)
-        )
-        .shadow(color: .black.opacity(0.24), radius: 18, y: 10)
+        .overlay(selectionChrome)
         .contentShape(Rectangle())
         .gesture(dragGesture)
         .simultaneousGesture(tapGesture)
+        .onTapGesture(count: 2) {
+            onDone()
+        }
+    }
+
+    private var selectionChrome: some View {
+        SelectionFrameChromeView(
+            size: layout.imageRect.size,
+            borderColor: Self.selectionFrameColor
+        )
     }
 
     private var annotationOverlay: some View {
@@ -599,6 +762,19 @@ private struct ScreenshotEditorRootView: View {
                     path,
                     with: .color(viewModel.selectedColor.swiftUIColor),
                     style: StrokeStyle(lineWidth: displayStrokeWidth(for: rectangleLineWidth))
+                )
+            }
+
+            if let draftHighlight {
+                let path = Path(roundedRect: draftHighlight, cornerRadius: 4)
+                context.fill(
+                    path,
+                    with: .color(viewModel.selectedColor.swiftUIColor.opacity(highlightOpacity))
+                )
+                context.stroke(
+                    path,
+                    with: .color(viewModel.selectedColor.swiftUIColor),
+                    style: StrokeStyle(lineWidth: 1)
                 )
             }
 
@@ -618,20 +794,63 @@ private struct ScreenshotEditorRootView: View {
                     )
                 )
             }
+
+            if let draftLine {
+                var path = Path()
+                path.move(to: draftLine.start)
+                path.addLine(to: draftLine.end)
+                context.stroke(
+                    path,
+                    with: .color(viewModel.selectedColor.swiftUIColor),
+                    style: StrokeStyle(
+                        lineWidth: displayStrokeWidth(for: lineLineWidth),
+                        lineCap: .round,
+                        lineJoin: .round
+                    )
+                )
+            }
+
+            if !draftPenPoints.isEmpty {
+                var path = Path()
+                if let first = draftPenPoints.first {
+                    path.move(to: first)
+                    for point in draftPenPoints.dropFirst() {
+                        path.addLine(to: point)
+                    }
+                }
+                context.stroke(
+                    path,
+                    with: .color(viewModel.selectedColor.swiftUIColor),
+                    style: StrokeStyle(
+                        lineWidth: displayStrokeWidth(for: penLineWidth),
+                        lineCap: .round,
+                        lineJoin: .round
+                    )
+                )
+            }
         }
-        .frame(width: layout.displayImageSize.width, height: layout.displayImageSize.height)
+        .frame(width: layout.imageRect.width, height: layout.imageRect.height)
     }
 
     private var toolbar: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             HStack(spacing: 8) {
                 ForEach(ScreenshotEditorTool.allCases) { tool in
-                    toolbarButton(
-                        icon: tool.symbolName,
-                        title: tool.title,
-                        isSelected: viewModel.activeTool == tool
-                    ) {
-                        switchTool(to: tool)
+                    if tool == .text {
+                        toolbarTextButton(
+                            title: "文字",
+                            isSelected: viewModel.activeTool == tool
+                        ) {
+                            switchTool(to: tool)
+                        }
+                    } else {
+                        toolbarButton(
+                            icon: tool.symbolName,
+                            title: tool.title,
+                            isSelected: viewModel.activeTool == tool
+                        ) {
+                            switchTool(to: tool)
+                        }
                     }
                 }
             }
@@ -649,15 +868,96 @@ private struct ScreenshotEditorRootView: View {
                                 .frame(width: 18, height: 18)
                                 .overlay(
                                     Circle()
-                                        .stroke(
-                                            viewModel.selectedColor == color ? Color.white : Color.clear,
-                                            lineWidth: 2
-                                        )
+                                        .stroke(viewModel.selectedColor == color ? Color.white : Color.clear, lineWidth: 2)
                                 )
                                 .shadow(color: .black.opacity(0.16), radius: 3, y: 2)
                         }
                         .buttonStyle(.plain)
                     }
+                }
+            }
+
+            if viewModel.activeTool == .text {
+                toolbarDivider
+
+                HStack(spacing: 6) {
+                    // Font size control
+                    Button {
+                        viewModel.textFontSize = max(12, viewModel.textFontSize - 4)
+                    } label: {
+                        Image(systemName: "textformat.size.smaller")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                            .frame(width: 26, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .help("减小字号")
+
+                    Text("\(Int(viewModel.textFontSize))")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.8))
+                        .frame(width: 24)
+
+                    Button {
+                        viewModel.textFontSize = min(72, viewModel.textFontSize + 4)
+                    } label: {
+                        Image(systemName: "textformat.size.larger")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                            .frame(width: 26, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .help("增大字号")
+
+                    toolbarDivider
+
+                    // Bold
+                    Button {
+                        viewModel.textIsBold.toggle()
+                    } label: {
+                        Image(systemName: "bold")
+                            .font(.system(size: 13, weight: viewModel.textIsBold ? .bold : .semibold))
+                            .foregroundStyle(viewModel.textIsBold ? Color.accentColor : Color.white.opacity(0.9))
+                            .frame(width: 26, height: 26)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(viewModel.textIsBold ? Color.white.opacity(0.9) : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help("加粗")
+
+                    // Italic
+                    Button {
+                        viewModel.textIsItalic.toggle()
+                    } label: {
+                        Image(systemName: "italic")
+                            .font(.system(size: 13, weight: viewModel.textIsItalic ? .bold : .semibold))
+                            .foregroundStyle(viewModel.textIsItalic ? Color.accentColor : Color.white.opacity(0.9))
+                            .frame(width: 26, height: 26)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(viewModel.textIsItalic ? Color.white.opacity(0.9) : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help("斜体")
+
+                    // Underline
+                    Button {
+                        viewModel.textIsUnderline.toggle()
+                    } label: {
+                        Image(systemName: "underline")
+                            .font(.system(size: 13, weight: viewModel.textIsUnderline ? .bold : .semibold))
+                            .foregroundStyle(viewModel.textIsUnderline ? Color.accentColor : Color.white.opacity(0.9))
+                            .frame(width: 26, height: 26)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(viewModel.textIsUnderline ? Color.white.opacity(0.9) : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help("下划线")
                 }
             }
 
@@ -669,7 +969,7 @@ private struct ScreenshotEditorRootView: View {
                 }
             }
 
-            toolbarButton(icon: "text.viewfinder", title: "提取文字", isSelected: false) {
+            toolbarButton(icon: "text.viewfinder", title: "提取文字", isSelected: false, isDisabled: viewModel.isExtractingText) {
                 triggerEditingAction(action: onExtractText)
             }
 
@@ -694,22 +994,21 @@ private struct ScreenshotEditorRootView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .frame(width: layout.toolbarWidth, height: layout.toolbarHeight)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(.ultraThinMaterial)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                .stroke(Color.white.opacity(0.2), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.2), radius: 16, y: 10)
+        .shadow(color: .black.opacity(0.22), radius: 16, y: 10)
     }
 
     private var toolbarDivider: some View {
         Rectangle()
             .fill(Color.white.opacity(0.18))
-            .frame(width: 1, height: 26)
+            .frame(width: 1, height: 24)
     }
 
     private func toolbarButton(
@@ -735,6 +1034,26 @@ private struct ScreenshotEditorRootView: View {
         .help(title)
     }
 
+    private func toolbarTextButton(
+        title: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.9))
+                .padding(.horizontal, 14)
+                .frame(height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(buttonBackground(isSelected: isSelected, accent: false, isDisabled: false))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(title)
+    }
+
     private func buttonForeground(isSelected: Bool, accent: Bool, isDisabled: Bool) -> Color {
         if isDisabled {
             return Color.white.opacity(0.32)
@@ -744,7 +1063,7 @@ private struct ScreenshotEditorRootView: View {
             return .white
         }
 
-        return Color(nsColor: .labelColor).opacity(0.9)
+        return Color(nsColor: .labelColor).opacity(0.92)
     }
 
     private func buttonBackground(isSelected: Bool, accent: Bool, isDisabled: Bool) -> Color {
@@ -780,8 +1099,28 @@ private struct ScreenshotEditorRootView: View {
                         height: abs(current.y - start.y)
                     ).integral
 
+                case .highlight:
+                    draftHighlight = CGRect(
+                        x: min(start.x, current.x),
+                        y: min(start.y, current.y),
+                        width: abs(current.x - start.x),
+                        height: abs(current.y - start.y)
+                    ).integral
+
                 case .arrow:
                     draftArrow = DraftArrow(start: start, end: current)
+
+                case .line:
+                    draftLine = DraftLine(start: start, end: current)
+
+                case .pen:
+                    if draftPenPoints.isEmpty {
+                        draftPenPoints = [start]
+                    }
+                    if let last = draftPenPoints.last,
+                       hypot(last.x - current.x, last.y - current.y) >= 2 {
+                        draftPenPoints.append(current)
+                    }
 
                 case .mosaic:
                     if draftMosaicPoints.isEmpty {
@@ -809,7 +1148,21 @@ private struct ScreenshotEditorRootView: View {
                             RectangleAnnotation(
                                 rect: displayRectToImageRect(draftRectangle),
                                 color: viewModel.selectedColor,
-                                lineWidth: rectangleLineWidth
+                                lineWidth: rectangleLineWidth,
+                                lineStyle: .solid
+                            )
+                        )
+                    )
+
+                case .highlight:
+                    defer { draftHighlight = nil }
+                    guard let draftHighlight, draftHighlight.width >= 8, draftHighlight.height >= 8 else { return }
+                    viewModel.addAnnotation(
+                        .highlight(
+                            HighlightAnnotation(
+                                rect: displayRectToImageRect(draftHighlight),
+                                color: viewModel.selectedColor,
+                                opacity: highlightOpacity
                             )
                         )
                     )
@@ -824,6 +1177,33 @@ private struct ScreenshotEditorRootView: View {
                                 end: displayPointToImagePoint(end),
                                 color: viewModel.selectedColor,
                                 lineWidth: arrowLineWidth
+                            )
+                        )
+                    )
+
+                case .line:
+                    defer { draftLine = nil }
+                    guard hypot(end.x - start.x, end.y - start.y) >= 10 else { return }
+                    viewModel.addAnnotation(
+                        .line(
+                            LineAnnotation(
+                                start: displayPointToImagePoint(start),
+                                end: displayPointToImagePoint(end),
+                                color: viewModel.selectedColor,
+                                lineWidth: lineLineWidth
+                            )
+                        )
+                    )
+
+                case .pen:
+                    defer { draftPenPoints = [] }
+                    guard draftPenPoints.count >= 2 else { return }
+                    viewModel.addAnnotation(
+                        .pen(
+                            PenAnnotation(
+                                points: draftPenPoints.map(displayPointToImagePoint),
+                                color: viewModel.selectedColor,
+                                lineWidth: penLineWidth
                             )
                         )
                     )
@@ -873,6 +1253,14 @@ private struct ScreenshotEditorRootView: View {
                     style: StrokeStyle(lineWidth: displayStrokeWidth(for: rectangle.lineWidth))
                 )
 
+            case let .highlight(highlight):
+                let rect = imageRectToDisplayRect(highlight.rect)
+                let path = Path(roundedRect: rect, cornerRadius: 4)
+                context.fill(
+                    path,
+                    with: .color(highlight.color.swiftUIColor.opacity(highlight.opacity))
+                )
+
             case let .arrow(arrow):
                 let path = arrowPath(
                     start: imagePointToDisplayPoint(arrow.start),
@@ -889,12 +1277,55 @@ private struct ScreenshotEditorRootView: View {
                     )
                 )
 
-            case let .text(text):
-                let fontSize = text.fontSize * displayScale
-                var resolvedText = context.resolve(
-                    Text(text.text)
-                        .font(.system(size: fontSize, weight: .semibold))
+            case let .line(line):
+                var path = Path()
+                path.move(to: imagePointToDisplayPoint(line.start))
+                path.addLine(to: imagePointToDisplayPoint(line.end))
+                context.stroke(
+                    path,
+                    with: .color(line.color.swiftUIColor),
+                    style: StrokeStyle(
+                        lineWidth: displayStrokeWidth(for: line.lineWidth),
+                        lineCap: .round,
+                        lineJoin: .round
+                    )
                 )
+
+            case let .pen(pen):
+                var path = Path()
+                let displayPoints = pen.points.map(imagePointToDisplayPoint)
+                if let first = displayPoints.first {
+                    path.move(to: first)
+                    for point in displayPoints.dropFirst() {
+                        path.addLine(to: point)
+                    }
+                }
+                context.stroke(
+                    path,
+                    with: .color(pen.color.swiftUIColor),
+                    style: StrokeStyle(
+                        lineWidth: displayStrokeWidth(for: pen.lineWidth),
+                        lineCap: .round,
+                        lineJoin: .round
+                    )
+                )
+
+            case let .text(text):
+                let fontSize = max(text.fontSize * layout.displayScale, 14)
+                let weight: Font.Weight = text.isBold ? .bold : .semibold
+
+                var textView = Text(text.text)
+                    .font(Font.system(size: fontSize, weight: weight))
+
+                if text.isItalic {
+                    textView = textView.italic()
+                }
+
+                if text.isUnderline {
+                    textView = textView.underline()
+                }
+
+                var resolvedText = context.resolve(textView)
                 resolvedText.shading = .color(text.color.swiftUIColor)
                 context.draw(resolvedText, at: imagePointToDisplayPoint(text.origin), anchor: .topLeading)
 
@@ -930,11 +1361,11 @@ private struct ScreenshotEditorRootView: View {
     private func draftTextEditor(at origin: CGPoint) -> some View {
         TextField("输入文字", text: $draftText)
             .textFieldStyle(.plain)
-            .font(.system(size: max(textFontSize * displayScale, 14), weight: .semibold))
+            .font(textFont)
             .foregroundStyle(viewModel.selectedColor.swiftUIColor)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .frame(width: min(240, layout.displayImageSize.width - 24), alignment: .leading)
+            .frame(width: min(240, layout.imageRect.width - 24), alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color.black.opacity(0.76))
@@ -944,8 +1375,8 @@ private struct ScreenshotEditorRootView: View {
                     .stroke(Color.white.opacity(0.18), lineWidth: 1)
             )
             .position(
-                x: min(origin.x + 120, layout.displayImageSize.width - 120),
-                y: min(origin.y + 18, layout.displayImageSize.height - 18)
+                x: min(origin.x + 120, layout.imageRect.width - 120),
+                y: min(origin.y + 18, layout.imageRect.height - 18)
             )
             .focused($isTextFieldFocused)
             .onSubmit {
@@ -956,6 +1387,25 @@ private struct ScreenshotEditorRootView: View {
                     commitTextDraftIfNeeded()
                 }
             }
+    }
+
+    private var textFont: Font {
+        let weight: Font.Weight = viewModel.textIsBold ? .bold : .semibold
+        let design: Font.Design = .default
+
+        if viewModel.textIsItalic {
+            return Font.system(
+                size: max(viewModel.textFontSize * layout.displayScale, 14),
+                weight: weight,
+                design: design
+            ).italic()
+        }
+
+        return Font.system(
+            size: max(viewModel.textFontSize * layout.displayScale, 14),
+            weight: weight,
+            design: design
+        )
     }
 
     private func switchTool(to tool: ScreenshotEditorTool) {
@@ -985,7 +1435,10 @@ private struct ScreenshotEditorRootView: View {
                     origin: displayPointToImagePoint(draftTextOrigin),
                     text: trimmedText,
                     color: viewModel.selectedColor,
-                    fontSize: textFontSize
+                    fontSize: viewModel.textFontSize,
+                    isBold: viewModel.textIsBold,
+                    isItalic: viewModel.textIsItalic,
+                    isUnderline: viewModel.textIsUnderline
                 )
             )
         )
@@ -999,56 +1452,52 @@ private struct ScreenshotEditorRootView: View {
 
     private func clampedDisplayPoint(for point: CGPoint) -> CGPoint {
         CGPoint(
-            x: min(max(point.x, 0), layout.displayImageSize.width),
-            y: min(max(point.y, 0), layout.displayImageSize.height)
+            x: min(max(point.x, 0), layout.imageRect.width),
+            y: min(max(point.y, 0), layout.imageRect.height)
         )
     }
 
     private func clampedTextOrigin(for point: CGPoint) -> CGPoint {
         CGPoint(
-            x: min(max(point.x, 12), max(layout.displayImageSize.width - 228, 12)),
-            y: min(max(point.y, 12), max(layout.displayImageSize.height - 40, 12))
+            x: min(max(point.x, 12), max(layout.imageRect.width - 228, 12)),
+            y: min(max(point.y, 12), max(layout.imageRect.height - 40, 12))
         )
     }
 
     private func imagePointToDisplayPoint(_ point: CGPoint) -> CGPoint {
         CGPoint(
-            x: point.x * displayScale,
-            y: point.y * displayScale
+            x: point.x * layout.displayScale,
+            y: point.y * layout.displayScale
         )
     }
 
     private func displayPointToImagePoint(_ point: CGPoint) -> CGPoint {
         CGPoint(
-            x: point.x / displayScale,
-            y: point.y / displayScale
+            x: point.x / layout.displayScale,
+            y: point.y / layout.displayScale
         )
     }
 
     private func imageRectToDisplayRect(_ rect: CGRect) -> CGRect {
         CGRect(
-            x: rect.origin.x * displayScale,
-            y: rect.origin.y * displayScale,
-            width: rect.width * displayScale,
-            height: rect.height * displayScale
+            x: rect.origin.x * layout.displayScale,
+            y: rect.origin.y * layout.displayScale,
+            width: rect.width * layout.displayScale,
+            height: rect.height * layout.displayScale
         )
     }
 
     private func displayRectToImageRect(_ rect: CGRect) -> CGRect {
         CGRect(
-            x: rect.origin.x / displayScale,
-            y: rect.origin.y / displayScale,
-            width: rect.width / displayScale,
-            height: rect.height / displayScale
+            x: rect.origin.x / layout.displayScale,
+            y: rect.origin.y / layout.displayScale,
+            width: rect.width / layout.displayScale,
+            height: rect.height / layout.displayScale
         )
     }
 
     private func displayStrokeWidth(for imageStrokeWidth: CGFloat) -> CGFloat {
-        max(imageStrokeWidth * displayScale, 2)
-    }
-
-    private var displayScale: CGFloat {
-        layout.displayImageSize.width / max(viewModel.image.size.width, 1)
+        max(imageStrokeWidth * layout.displayScale, 2)
     }
 
     private var hasVisibleMosaicContent: Bool {
@@ -1058,6 +1507,65 @@ private struct ScreenshotEditorRootView: View {
             }
             return false
         } || !draftMosaicPoints.isEmpty
+    }
+}
+
+private struct ScreenshotEditorBackdropView: View {
+    let screenSize: CGSize
+    let imageRect: CGRect
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Canvas { context, size in
+            var path = Path(CGRect(origin: .zero, size: size))
+            path.addPath(Path(roundedRect: imageRect.insetBy(dx: -1, dy: -1), cornerRadius: 8))
+
+            let opacity = colorScheme == .dark ? 0.65 : 0.48
+            context.fill(
+                path,
+                with: .color(Color.black.opacity(opacity)),
+                style: FillStyle(eoFill: true)
+            )
+        }
+        .frame(width: screenSize.width, height: screenSize.height)
+    }
+}
+
+private struct SelectionFrameChromeView: View {
+    let size: CGSize
+    let borderColor: Color
+
+    private let handleSize: CGFloat = 7
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .stroke(borderColor, lineWidth: 2)
+
+            ForEach(Array(handleCenters.enumerated()), id: \.offset) { _, center in
+                Rectangle()
+                    .fill(borderColor)
+                    .frame(width: handleSize, height: handleSize)
+                    .position(center)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    private var handleCenters: [CGPoint] {
+        let width = size.width
+        let height = size.height
+
+        return [
+            CGPoint(x: 0, y: 0),
+            CGPoint(x: width / 2, y: 0),
+            CGPoint(x: width, y: 0),
+            CGPoint(x: 0, y: height / 2),
+            CGPoint(x: width, y: height / 2),
+            CGPoint(x: 0, y: height),
+            CGPoint(x: width / 2, y: height),
+            CGPoint(x: width, y: height),
+        ]
     }
 }
 
@@ -1083,7 +1591,7 @@ private struct MosaicMaskView: View {
 
     private func strokeMosaic(points: [CGPoint], brushSize: CGFloat, in context: inout GraphicsContext) {
         let displayPoints = points.map(imagePointToDisplayPoint)
-        let lineWidth = max((brushSize * displayScale), 10)
+        let lineWidth = max(brushSize * displayScale, 10)
         stroke(points: displayPoints, lineWidth: lineWidth, in: &context)
     }
 
@@ -1134,8 +1642,6 @@ private enum ScreenshotEditorRenderer {
     private static let ciContext = CIContext()
 
     static func render(image: NSImage, annotations: [ScreenshotEditorAnnotation]) -> NSImage {
-        guard let cgImage = image.cgImageRepresentation else { return image }
-
         let size = image.size
         let renderedImage = NSImage(size: size)
         renderedImage.lockFocus()
@@ -1146,17 +1652,15 @@ private enum ScreenshotEditorRenderer {
         }
 
         context.interpolationQuality = .high
-        context.translateBy(x: 0, y: size.height)
-        context.scaleBy(x: 1, y: -1)
-
-        context.draw(cgImage, in: CGRect(origin: .zero, size: size))
+        image.draw(in: CGRect(origin: .zero, size: size), from: .zero, operation: .copy, fraction: 1)
 
         if annotations.contains(where: { annotation in
             if case .mosaic = annotation {
                 return true
             }
             return false
-        }), let pixelatedCGImage = makePixelatedCGImage(for: cgImage) {
+        }), let cgImage = image.cgImageRepresentation,
+           let pixelatedCGImage = makePixelatedCGImage(for: cgImage) {
             drawMosaics(annotations, pixelatedImage: pixelatedCGImage, in: context, size: size)
         }
 
@@ -1197,9 +1701,10 @@ private enum ScreenshotEditorRenderer {
             guard case let .mosaic(mosaic) = annotation else { continue }
 
             if mosaic.points.count == 1, let point = mosaic.points.first {
+                let convertedPoint = appKitPoint(fromTopLeftPoint: point, canvasSize: size)
                 let rect = CGRect(
-                    x: point.x - (mosaic.brushSize / 2),
-                    y: point.y - (mosaic.brushSize / 2),
+                    x: convertedPoint.x - (mosaic.brushSize / 2),
+                    y: convertedPoint.y - (mosaic.brushSize / 2),
                     width: mosaic.brushSize,
                     height: mosaic.brushSize
                 )
@@ -1213,9 +1718,9 @@ private enum ScreenshotEditorRenderer {
 
             let path = CGMutablePath()
             if let first = mosaic.points.first {
-                path.move(to: first)
+                path.move(to: appKitPoint(fromTopLeftPoint: first, canvasSize: size))
                 for point in mosaic.points.dropFirst() {
-                    path.addLine(to: point)
+                    path.addLine(to: appKitPoint(fromTopLeftPoint: point, canvasSize: size))
                 }
             }
 
@@ -1243,7 +1748,7 @@ private enum ScreenshotEditorRenderer {
             switch annotation {
             case let .rectangle(rectangle):
                 let path = CGPath(
-                    roundedRect: rectangle.rect,
+                    roundedRect: appKitRect(fromTopLeftRect: rectangle.rect, canvasSize: size),
                     cornerWidth: 6,
                     cornerHeight: 6,
                     transform: nil
@@ -1253,45 +1758,109 @@ private enum ScreenshotEditorRenderer {
                 context.addPath(path)
                 context.strokePath()
 
+            case let .highlight(highlight):
+                let rect = appKitRect(fromTopLeftRect: highlight.rect, canvasSize: size)
+                let path = CGPath(
+                    roundedRect: rect,
+                    cornerWidth: 6,
+                    cornerHeight: 6,
+                    transform: nil
+                )
+                context.setFillColor(highlight.color.nsColor.withAlphaComponent(highlight.opacity).cgColor)
+                context.addPath(path)
+                context.fillPath()
+
             case let .arrow(arrow):
+                let start = appKitPoint(fromTopLeftPoint: arrow.start, canvasSize: size)
+                let end = appKitPoint(fromTopLeftPoint: arrow.end, canvasSize: size)
                 context.setStrokeColor(arrow.color.nsColor.cgColor)
                 context.setLineWidth(arrow.lineWidth)
                 context.setLineCap(.round)
                 context.setLineJoin(.round)
                 context.beginPath()
-                context.move(to: arrow.start)
-                context.addLine(to: arrow.end)
+                context.move(to: start)
+                context.addLine(to: end)
 
-                let angle = atan2(arrow.end.y - arrow.start.y, arrow.end.x - arrow.start.x)
+                let angle = atan2(end.y - start.y, end.x - start.x)
                 let headLength = max(arrow.lineWidth * 4.8, 12)
                 let leftPoint = CGPoint(
-                    x: arrow.end.x - cos(angle - .pi / 6) * headLength,
-                    y: arrow.end.y - sin(angle - .pi / 6) * headLength
+                    x: end.x - cos(angle - .pi / 6) * headLength,
+                    y: end.y - sin(angle - .pi / 6) * headLength
                 )
                 let rightPoint = CGPoint(
-                    x: arrow.end.x - cos(angle + .pi / 6) * headLength,
-                    y: arrow.end.y - sin(angle + .pi / 6) * headLength
+                    x: end.x - cos(angle + .pi / 6) * headLength,
+                    y: end.y - sin(angle + .pi / 6) * headLength
                 )
-                context.move(to: arrow.end)
+                context.move(to: end)
                 context.addLine(to: leftPoint)
-                context.move(to: arrow.end)
+                context.move(to: end)
                 context.addLine(to: rightPoint)
+                context.strokePath()
+
+            case let .line(line):
+                let start = appKitPoint(fromTopLeftPoint: line.start, canvasSize: size)
+                let end = appKitPoint(fromTopLeftPoint: line.end, canvasSize: size)
+                context.setStrokeColor(line.color.nsColor.cgColor)
+                context.setLineWidth(line.lineWidth)
+                context.setLineCap(.round)
+                context.setLineJoin(.round)
+                context.beginPath()
+                context.move(to: start)
+                context.addLine(to: end)
+                context.strokePath()
+
+            case let .pen(pen):
+                context.setStrokeColor(pen.color.nsColor.cgColor)
+                context.setLineWidth(pen.lineWidth)
+                context.setLineCap(.round)
+                context.setLineJoin(.round)
+                context.beginPath()
+                if let first = pen.points.first {
+                    context.move(to: appKitPoint(fromTopLeftPoint: first, canvasSize: size))
+                    for point in pen.points.dropFirst() {
+                        context.addLine(to: appKitPoint(fromTopLeftPoint: point, canvasSize: size))
+                    }
+                }
                 context.strokePath()
 
             case let .text(text):
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.lineBreakMode = .byWordWrapping
 
-                let attributes: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: text.fontSize, weight: .semibold),
+                var fontTraits: NSFontDescriptor.SymbolicTraits = []
+                if text.isBold {
+                    fontTraits.insert(.bold)
+                }
+                if text.isItalic {
+                    fontTraits.insert(.italic)
+                }
+
+                let baseFont = NSFont.systemFont(ofSize: text.fontSize, weight: text.isBold ? .bold : .semibold)
+                var font = baseFont
+
+                if text.isItalic {
+                    let descriptor = baseFont.fontDescriptor.withSymbolicTraits(fontTraits)
+                    font = NSFont(descriptor: descriptor, size: text.fontSize) ?? baseFont
+                }
+
+                var attributes: [NSAttributedString.Key: Any] = [
+                    .font: font,
                     .foregroundColor: text.color.nsColor,
                     .paragraphStyle: paragraph,
                 ]
 
+                if text.isUnderline {
+                    attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                    attributes[.underlineColor] = text.color.nsColor
+                }
+
                 let attributedText = NSAttributedString(string: text.text, attributes: attributes)
+                let textHeight = max(size.height - text.origin.y - 8, text.fontSize + 12)
                 let textRect = CGRect(
-                    origin: text.origin,
-                    size: CGSize(width: size.width - text.origin.x - 8, height: size.height - text.origin.y - 8)
+                    x: text.origin.x,
+                    y: size.height - text.origin.y - textHeight,
+                    width: size.width - text.origin.x - 8,
+                    height: textHeight
                 )
                 attributedText.draw(in: textRect)
 
@@ -1299,6 +1868,22 @@ private enum ScreenshotEditorRenderer {
                 break
             }
         }
+    }
+
+    private static func appKitPoint(fromTopLeftPoint point: CGPoint, canvasSize: CGSize) -> CGPoint {
+        CGPoint(
+            x: point.x,
+            y: canvasSize.height - point.y
+        )
+    }
+
+    private static func appKitRect(fromTopLeftRect rect: CGRect, canvasSize: CGSize) -> CGRect {
+        CGRect(
+            x: rect.origin.x,
+            y: canvasSize.height - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
     }
 }
 
@@ -1339,31 +1924,124 @@ private enum ScreenshotEditorFileIO {
 
 private enum RecognizedTextPresenter {
     @MainActor
-    static func present(text: String) {
-        let alert = NSAlert()
-        alert.messageText = "提取到的文字"
-        alert.informativeText = "识别结果已复制到剪贴板。"
-        alert.addButton(withTitle: "关闭")
-        alert.accessoryView = makeAccessoryView(for: text)
-        alert.runModal()
+    private static var windowController: RecognizedTextWindowController?
+
+    @MainActor
+    static func present(text: String, parentWindow: NSWindow?) {
+        windowController?.close()
+
+        let controller = RecognizedTextWindowController(text: text) {
+            windowController = nil
+        }
+        windowController = controller
+        controller.show(relativeTo: parentWindow)
+    }
+}
+
+@MainActor
+private final class RecognizedTextWindowController: NSWindowController, NSWindowDelegate {
+    private let onClose: () -> Void
+
+    init(text: String, onClose: @escaping () -> Void) {
+        self.onClose = onClose
+
+        let panel = NSPanel(
+            contentRect: CGRect(x: 0, y: 0, width: 420, height: 280),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+
+        super.init(window: panel)
+        configureWindow(panel, text: text)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let parent = window?.parent {
+            parent.removeChildWindow(window!)
+        }
+        onClose()
+    }
+
+    func show(relativeTo parentWindow: NSWindow?) {
+        guard let window else { return }
+
+        if let parentWindow {
+            parentWindow.addChildWindow(window, ordered: .above)
+            let origin = CGPoint(
+                x: parentWindow.frame.midX - (window.frame.width / 2),
+                y: parentWindow.frame.midY - (window.frame.height / 2)
+            )
+            window.setFrameOrigin(origin)
+            parentWindow.makeKey()
+        } else {
+            window.center()
+        }
+
+        window.orderFrontRegardless()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor
-    private static func makeAccessoryView(for text: String) -> NSView {
-        let scrollView = NSScrollView(frame: CGRect(x: 0, y: 0, width: 360, height: 180))
+    private func configureWindow(_ window: NSPanel, text: String) {
+        window.delegate = self
+        window.isReleasedWhenClosed = false
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.title = "提取到的文字"
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = false
+        window.isFloatingPanel = true
+        window.hidesOnDeactivate = false
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
+
+        let container = NSView(frame: CGRect(x: 0, y: 0, width: 420, height: 280))
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let subtitle = NSTextField(labelWithString: "识别结果已复制到剪贴板。")
+        subtitle.font = .systemFont(ofSize: 13)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        let scrollView = NSScrollView(frame: .zero)
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        let textView = NSTextView(frame: scrollView.bounds)
+        let textView = NSTextView(frame: .zero)
         textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.font = .systemFont(ofSize: 13)
         textView.string = text
+        textView.textContainerInset = CGSize(width: 2, height: 6)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
 
         scrollView.documentView = textView
-        return scrollView
+
+        container.addSubview(subtitle)
+        container.addSubview(scrollView)
+
+        NSLayoutConstraint.activate([
+            subtitle.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            subtitle.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
+            subtitle.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
+            scrollView.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 12),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -18),
+        ])
+
+        window.contentView = container
     }
 }
 
@@ -1389,5 +2067,98 @@ private extension NSImage {
         }
 
         return bitmap.representation(using: .png, properties: [:])
+    }
+}
+
+// MARK: - Toast View
+
+private struct ToastView: View {
+    let message: String
+    @State private var isAnimating = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+
+            Text(message)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.black.opacity(0.78))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 4)
+        .scaleEffect(isAnimating ? 1 : 0.85)
+        .opacity(isAnimating ? 1 : 0)
+        .onAppear {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                isAnimating = true
+            }
+        }
+    }
+}
+
+// MARK: - Tool Shortcuts Overlay
+
+private struct ToolShortcutsOverlay: View {
+    @State private var isAnimating = false
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
+                shortcutItem(key: "1", tool: "线框")
+                shortcutItem(key: "2", tool: "高亮")
+                shortcutItem(key: "3", tool: "文字")
+                shortcutItem(key: "4", tool: "箭头")
+            }
+            HStack(spacing: 12) {
+                shortcutItem(key: "5", tool: "直线")
+                shortcutItem(key: "6", tool: "画笔")
+                shortcutItem(key: "7", tool: "马赛克")
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.black.opacity(0.72))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.3), radius: 20, x: 0, y: 8)
+        .scaleEffect(isAnimating ? 1 : 0.9)
+        .opacity(isAnimating ? 1 : 0)
+        .onAppear {
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) {
+                isAnimating = true
+            }
+        }
+    }
+
+    private func shortcutItem(key: String, tool: String) -> some View {
+        HStack(spacing: 6) {
+            Text(key)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.2))
+                )
+
+            Text(tool)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.9))
+        }
     }
 }

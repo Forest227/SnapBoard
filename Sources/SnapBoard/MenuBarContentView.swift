@@ -118,6 +118,12 @@ struct MenuBarContentView: View {
             .buttonStyle(.bordered)
             .disabled(appState.pinnedCount == 0)
 
+            Button(action: appState.openHistory) {
+                Label("截图历史", systemImage: "clock.arrow.circlepath")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderless)
+
             Button(action: appState.openSettings) {
                 Label("设置", systemImage: "gearshape")
                     .frame(maxWidth: .infinity)

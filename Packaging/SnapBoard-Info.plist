@@ -8,6 +8,8 @@
     <string>SnapBoard</string>
     <key>CFBundleExecutable</key>
     <string>SnapBoard</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.wuqicheng.snapboard</string>
     <key>CFBundleInfoDictionaryVersion</key>

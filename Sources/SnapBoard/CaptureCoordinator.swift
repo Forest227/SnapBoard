@@ -161,25 +161,38 @@ final class CaptureCoordinator {
     }
 
     private func finishCapture(with request: ScreenshotCaptureRequest) {
-        cancelSelectionMode()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-            guard let self else { return }
-            guard let image = ScreenshotCapturer.capture(request: request) else {
-                NSSound.beep()
-                return
-            }
-
-            self.presentCapturedImage(image, request: request)
+        // For display capture, overlay covers the whole screen so must hide first
+        if case .display = request {
+            overlayWindowControllers.forEach { $0.window?.orderOut(nil) }
         }
+
+        guard let image = ScreenshotCapturer.capture(request: request) else {
+            NSSound.beep()
+            cancelSelectionMode()
+            return
+        }
+
+        if transitionSelectionOverlayToEditor(with: image, request: request) {
+            return
+        }
+
+        cancelSelectionMode()
+        presentCapturedImage(image, request: request)
     }
 
     private func presentCapturedImage(_ image: NSImage, request: ScreenshotCaptureRequest) {
+        ScreenshotHistory.shared.add(image)
+        let sourceRect = editorSourceRect(for: request)
+        presentCapturedImage(image, sourceRect: sourceRect)
+    }
+
+    private func presentCapturedImage(_ image: NSImage, sourceRect: CGRect?, existingWindow: NSWindow? = nil) {
         screenshotEditorWindowController?.close()
 
         let controller = ScreenshotEditorWindowController(
             image: image,
-            sourceRect: editorSourceRect(for: request),
+            sourceRect: sourceRect,
+            existingWindow: existingWindow,
             onPin: { [weak self] editedImage in
                 self?.presentPinnedWindow(for: editedImage)
             },
@@ -195,6 +208,25 @@ final class CaptureCoordinator {
         controller.showWindow(nil)
         controller.window?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func transitionSelectionOverlayToEditor(with image: NSImage, request: ScreenshotCaptureRequest) -> Bool {
+        guard let sourceRect = editorSourceRect(for: request),
+              let targetIndex = overlayWindowControllers.firstIndex(where: { $0.contains(globalRect: sourceRect) }),
+              let transitionWindow = overlayWindowControllers[targetIndex].takeWindowForTransition() else {
+            return false
+        }
+
+        let controllersToClose = overlayWindowControllers.enumerated().compactMap { index, controller in
+            index == targetIndex ? nil : controller
+        }
+        overlayWindowControllers.removeAll()
+
+        controllersToClose.forEach { $0.close() }
+
+        popCrosshairCursor()
+        presentCapturedImage(image, sourceRect: sourceRect, existingWindow: transitionWindow)
+        return true
     }
 
     private func presentPinnedWindow(for image: NSImage) {
@@ -224,7 +256,7 @@ final class CaptureCoordinator {
             globalRect(for: selection)
 
         case let .window(selection):
-            selection.bounds
+            cocoaGlobalRect(forWindowScreenRect: selection.bounds)
         }
     }
 
@@ -244,6 +276,16 @@ final class CaptureCoordinator {
             y: screen.frame.maxY - selection.rect.maxY,
             width: selection.rect.width,
             height: selection.rect.height
+        )
+    }
+
+    private func cocoaGlobalRect(forWindowScreenRect rect: CGRect) -> CGRect {
+        let desktopTopEdge = NSScreen.screens.map(\.frame.maxY).max() ?? rect.maxY
+        return CGRect(
+            x: rect.minX,
+            y: desktopTopEdge - rect.maxY,
+            width: rect.width,
+            height: rect.height
         )
     }
 
@@ -283,12 +325,7 @@ enum ScreenshotCapturer {
 
     @MainActor
     private static func captureArea(selection: ScreenSelection) -> NSImage? {
-        let captureRect = CGRect(
-            x: selection.rect.origin.x * selection.scaleFactor,
-            y: selection.rect.origin.y * selection.scaleFactor,
-            width: selection.rect.width * selection.scaleFactor,
-            height: selection.rect.height * selection.scaleFactor
-        ).integral
+        let captureRect = selection.rect.integral
 
         guard let image = CGDisplayCreateImage(selection.displayID, rect: captureRect) else {
             return nil

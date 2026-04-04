@@ -4,6 +4,8 @@ import Foundation
 
 @MainActor
 final class SelectionOverlayWindowController: NSWindowController {
+    let screen: NSScreen
+
     init(
         screen: NSScreen,
         mode: CaptureSelectionMode,
@@ -11,6 +13,8 @@ final class SelectionOverlayWindowController: NSWindowController {
         captureHandler: @escaping (ScreenshotCaptureRequest) -> Void,
         cancelHandler: @escaping () -> Void
     ) {
+        self.screen = screen
+
         let window = SelectionOverlayWindow(
             contentRect: screen.frame,
             styleMask: .borderless,
@@ -45,6 +49,16 @@ final class SelectionOverlayWindowController: NSWindowController {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    func contains(globalRect: CGRect) -> Bool {
+        screen.frame.intersects(globalRect)
+    }
+
+    func takeWindowForTransition() -> NSWindow? {
+        let retainedWindow = window
+        window = nil
+        return retainedWindow
     }
 }
 
@@ -179,6 +193,18 @@ private final class SelectionOverlayCanvasView: NSView {
         switch mode {
         case .framed:
             dragCurrentPoint = point
+            let shouldTreatAsAreaSelection: Bool
+            if let dragStartPoint {
+                shouldTreatAsAreaSelection =
+                    isAreaSelectionActive || dragDistance(from: dragStartPoint, to: point) >= dragActivationDistance
+            } else {
+                shouldTreatAsAreaSelection = isAreaSelectionActive
+            }
+
+            if shouldTreatAsAreaSelection, !isAreaSelectionActive {
+                isAreaSelectionActive = true
+            }
+
             let rect = areaSelectionRect
 
             defer {
@@ -188,7 +214,7 @@ private final class SelectionOverlayCanvasView: NSView {
                 needsDisplay = true
             }
 
-            if isAreaSelectionActive {
+            if shouldTreatAsAreaSelection {
                 guard let rect, rect.width >= 8, rect.height >= 8 else {
                     NSSound.beep()
                     return

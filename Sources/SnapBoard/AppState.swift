@@ -3,6 +3,7 @@ import AppKit
 import Carbon.HIToolbox
 import Foundation
 import ServiceManagement
+import SwiftUI
 
 enum ScreenCapturePermissionStatus {
     case granted
@@ -20,6 +21,11 @@ final class AppState: ObservableObject {
     @Published private(set) var isMousePassthroughEnabled = false
     @Published private(set) var isLaunchAtLoginEnabled = false
     @Published private(set) var launchAtLoginStatusMessage = ""
+    @Published var currentTheme: AppTheme {
+        didSet {
+            ThemeManager.shared.currentTheme = currentTheme
+        }
+    }
 
     var dismissStatusPanel: (() -> Void)?
 
@@ -27,12 +33,14 @@ final class AppState: ObservableObject {
     private var hotKeyMonitors: [GlobalHotKeyMonitor] = []
     private var settingsWindowController: SettingsWindowController?
     private var applicationDidBecomeActiveObserver: NSObjectProtocol?
+    private var accessibilityPermissionMonitor: Timer?
     private var isConfigured = false
     private var pendingLaunchScreenCapturePrompt = false
 
     init() {
         framedHotKeyConfiguration = Self.loadHotKeyConfiguration(for: .framed)
         displayHotKeyConfiguration = Self.loadHotKeyConfiguration(for: .display)
+        currentTheme = ThemeManager.shared.currentTheme
     }
 
     var framedHotKeyDisplay: String {
@@ -74,6 +82,9 @@ final class AppState: ObservableObject {
             NotificationCenter.default.removeObserver(applicationDidBecomeActiveObserver)
             self.applicationDidBecomeActiveObserver = nil
         }
+
+        accessibilityPermissionMonitor?.invalidate()
+        accessibilityPermissionMonitor = nil
     }
 
     func refreshPermissionStatus() {
@@ -92,14 +103,42 @@ final class AppState: ObservableObject {
     func requestScreenCaptureAccess() {
         dismissStatusPanel?()
 
-        permissionStatus = captureCoordinator.requestScreenCapturePermission() ? .granted : .needsPermission
+        CGRequestScreenCaptureAccess()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            if CGPreflightScreenCaptureAccess() {
+                self.permissionStatus = .granted
+            } else {
+                self.presentRestartPrompt()
+            }
+        }
+    }
+
+    private func presentRestartPrompt() {
+        let alert = NSAlert()
+        alert.messageText = "需要重启 SnapBoard"
+        alert.informativeText = "屏幕录制权限已授予，请退出并重新打开 SnapBoard 使权限生效。"
+        alert.addButton(withTitle: "退出")
+        alert.addButton(withTitle: "稍后")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSApp.terminate(nil)
+        }
     }
 
     func requestAccessibilityAccess() {
         dismissStatusPanel?()
 
+        if permissionStatus == .needsPermission {
+            pendingLaunchScreenCapturePrompt = true
+        }
+
         _ = Self.hasAccessibilityPermission(prompt: true)
         refreshAccessibilityPermissionStatus()
+
+        if pendingLaunchScreenCapturePrompt {
+            startMonitoringAccessibilityPermissionIfNeeded()
+        }
     }
 
     func startCapture() {
@@ -152,6 +191,11 @@ final class AppState: ObservableObject {
     func quit() {
         dismissStatusPanel?()
         NSApp.terminate(nil)
+    }
+
+    func openHistory() {
+        dismissStatusPanel?()
+        HistoryWindowController.present()
     }
 
     func openSettings() {
@@ -382,6 +426,8 @@ final class AppState: ObservableObject {
         refreshAccessibilityPermissionStatus()
         guard isAccessibilityPermissionGranted else { return }
 
+        accessibilityPermissionMonitor?.invalidate()
+        accessibilityPermissionMonitor = nil
         pendingLaunchScreenCapturePrompt = false
         guard !captureCoordinator.hasScreenCapturePermission else {
             refreshPermissionStatus()
@@ -391,6 +437,33 @@ final class AppState: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         let isGranted = captureCoordinator.requestScreenCapturePermission()
         permissionStatus = isGranted ? .granted : .needsPermission
+    }
+
+    private func startMonitoringAccessibilityPermissionIfNeeded() {
+        guard accessibilityPermissionMonitor == nil else { return }
+
+        accessibilityPermissionMonitor = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] timer in
+            guard self != nil else {
+                timer.invalidate()
+                return
+            }
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+
+                guard self.pendingLaunchScreenCapturePrompt else {
+                    self.accessibilityPermissionMonitor?.invalidate()
+                    self.accessibilityPermissionMonitor = nil
+                    return
+                }
+
+                self.handlePendingLaunchScreenCapturePromptIfNeeded()
+                if !self.pendingLaunchScreenCapturePrompt {
+                    self.accessibilityPermissionMonitor?.invalidate()
+                    self.accessibilityPermissionMonitor = nil
+                }
+            }
+        }
     }
 
     private static func hasAccessibilityPermission(prompt: Bool) -> Bool {

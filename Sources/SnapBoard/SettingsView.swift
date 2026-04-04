@@ -7,6 +7,7 @@ struct SettingsView: View {
         ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                themeSection
                 launchAtLoginSection
                 shortcutSection
             }
@@ -65,6 +66,31 @@ struct SettingsView: View {
                     .font(.system(size: 12.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var themeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("外观", systemImage: "paintbrush")
+                .font(.system(size: 15, weight: .semibold))
+
+            Text("选择应用界面主题，截图编辑器将跟随此设置。")
+                .font(.system(size: 12.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                ForEach(AppTheme.allCases) { theme in
+                    ThemeButton(
+                        theme: theme,
+                        isSelected: appState.currentTheme == theme,
+                        action: { appState.currentTheme = theme }
+                    )
+                }
             }
         }
         .padding(14)
@@ -262,5 +288,36 @@ private extension ModifierToggle {
         case .command:
             "command"
         }
+    }
+}
+
+private struct ThemeButton: View {
+    let theme: AppTheme
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: theme.icon)
+                    .font(.system(size: 20))
+                    .foregroundStyle(isSelected ? Color.accentColor : .primary)
+
+                Text(theme.displayName)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? Color.accentColor : .primary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isSelected ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
