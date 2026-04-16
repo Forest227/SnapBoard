@@ -1,0 +1,92 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update Info.plist version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PLIST="Packaging/SnapBoard-Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
+          BUILD_NUM=$(echo "$VERSION" | awk -F. '{print $3}')
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUM:-1}" "$PLIST"
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Package .app bundle
+        run: bash Scripts/build_app.sh
+
+      - name: Create DMG
+        run: |
+          DMG_NAME="SnapBoard-${{ steps.version.outputs.tag }}.dmg"
+          mkdir -p dmg_staging
+          cp -R Build/SnapBoard.app dmg_staging/
+          ln -s /Applications dmg_staging/Applications
+          hdiutil create -volname "SnapBoard" \
+            -srcfolder dmg_staging \
+            -ov -format UDZO \
+            "Build/$DMG_NAME"
+          echo "dmg_name=$DMG_NAME" >> "$GITHUB_OUTPUT"
+        id: dmg
+
+      - name: Create ZIP
+        run: |
+          cd Build
+          ZIP_NAME="SnapBoard-${{ steps.version.outputs.tag }}.zip"
+          ditto -c -k --keepParent SnapBoard.app "$ZIP_NAME"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+        id: zip
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          # Find previous tag
+          PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^${TAG}$" | tail -1)
+          if [ "$PREV_TAG" = "$TAG" ] || [ -z "$PREV_TAG" ]; then
+            # No previous tag, use all commits
+            COMMITS=$(git log --pretty=format:"- %s" "$TAG")
+          else
+            COMMITS=$(git log --pretty=format:"- %s" "${PREV_TAG}..${TAG}")
+          fi
+
+          # Write to file to preserve newlines
+          cat > /tmp/changelog.md << 'HEADER'
+          ## What's Changed
+          HEADER
+          echo "$COMMITS" >> /tmp/changelog.md
+          echo "" >> /tmp/changelog.md
+          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}" >> /tmp/changelog.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: SnapBoard ${{ steps.version.outputs.tag }}
+          body_path: /tmp/changelog.md
+          files: |
+            Build/${{ steps.dmg.outputs.dmg_name }}
+            Build/${{ steps.zip.outputs.zip_name }}
+          draft: false
+          prerelease: false
