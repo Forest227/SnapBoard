@@ -8,13 +8,14 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 20) {
                 header
                 themeSection
+                captureTimingModeSection
                 launchAtLoginSection
                 shortcutSection
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(minWidth: 430, idealWidth: 430, minHeight: 500, idealHeight: 500)
+        .frame(minWidth: 430, idealWidth: 430, minHeight: 500, idealHeight: 580)
         .background(
             LinearGradient(
                 colors: [
@@ -34,10 +35,35 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("设置")
                 .font(.system(size: 26, weight: .bold, design: .rounded))
-            Text("管理开机启动和截图快捷键。")
+            Text("管理开机启动、截图模式和截图快捷键。")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var captureTimingModeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("截图模式", systemImage: "camera.viewfinder")
+                .font(.system(size: 15, weight: .semibold))
+
+            Text("选择触发截图时的行为方式。")
+                .font(.system(size: 12.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                ForEach(CaptureTimingMode.allCases) { mode in
+                    CaptureTimingModeButton(
+                        mode: mode,
+                        isSelected: appState.captureTimingMode == mode,
+                        action: { appState.captureTimingMode = mode }
+                    )
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var launchAtLoginSection: some View {
@@ -316,6 +342,45 @@ private struct ThemeButton: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isSelected ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct CaptureTimingModeButton: View {
+    let mode: CaptureTimingMode
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: mode.icon)
+                    .font(.system(size: 20))
+                    .foregroundStyle(isSelected ? Color.accentColor : .primary)
+
+                Text(mode.title)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? Color.accentColor : .primary)
+
+                Text(mode.description)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .padding(.horizontal, 8)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.05))

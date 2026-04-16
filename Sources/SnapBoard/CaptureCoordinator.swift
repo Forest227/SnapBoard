@@ -2,6 +2,40 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+enum CaptureTimingMode: String, CaseIterable, Identifiable, Codable {
+    case freezeFirst = "freezeFirst"
+    case liveSelect = "liveSelect"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .freezeFirst:
+            "先冻结"
+        case .liveSelect:
+            "先选择"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .freezeFirst:
+            "触发截图时立即冻结屏幕，在静止画面上框选和编辑"
+        case .liveSelect:
+            "先在实时画面上框选，确认后才捕获对应区域"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .freezeFirst:
+            "snow"
+        case .liveSelect:
+            "cursorarrow.and.square.on.square.dashed"
+        }
+    }
+}
+
 enum CaptureSelectionMode {
     case framed
     case display
@@ -65,6 +99,7 @@ final class CaptureCoordinator {
     private var isPinnedWindowMousePassthroughEnabled = false
     private var framedHotKeyHint = "⌘⇧S"
     private var displayHotKeyHint = "⌘⇧F"
+    var captureTimingMode: CaptureTimingMode = .liveSelect
 
     var hasScreenCapturePermission: Bool {
         CGPreflightScreenCaptureAccess()
@@ -104,15 +139,31 @@ final class CaptureCoordinator {
     private func beginSelectionMode(for mode: CaptureSelectionMode) {
         guard overlayWindowControllers.isEmpty else { return }
 
+        // In freeze-first mode, capture all screens before showing overlay
+        var frozenScreenImages: [CGDirectDisplayID: CGImage] = [:]
+        if captureTimingMode == .freezeFirst {
+            for screen in NSScreen.screens {
+                guard let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
+                      let cgImage = CGDisplayCreateImage(displayID) else {
+                    continue
+                }
+                frozenScreenImages[displayID] = cgImage
+            }
+        }
+
         pushCrosshairCursor()
 
         overlayWindowControllers = NSScreen.screens.compactMap { screen in
+            let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+            let frozenImage = frozenScreenImages[displayID]
+
             let controller = SelectionOverlayWindowController(
                 screen: screen,
                 mode: mode,
                 hotKeyHint: hotKeyHint,
+                frozenImage: frozenImage,
                 captureHandler: { [weak self] request in
-                    self?.finishCapture(with: request)
+                    self?.finishCapture(with: request, frozenScreenImages: frozenScreenImages)
                 },
                 cancelHandler: { [weak self] in
                     self?.cancelSelectionMode()
@@ -164,13 +215,22 @@ final class CaptureCoordinator {
         "\(framedHotKeyHint) / \(displayHotKeyHint)"
     }
 
-    private func finishCapture(with request: ScreenshotCaptureRequest) {
+    private func finishCapture(with request: ScreenshotCaptureRequest, frozenScreenImages: [CGDirectDisplayID: CGImage] = [:]) {
         // For display capture, overlay covers the whole screen so must hide first
         if case .display = request {
             overlayWindowControllers.forEach { $0.window?.orderOut(nil) }
         }
 
-        guard let image = ScreenshotCapturer.capture(request: request) else {
+        let image: NSImage?
+        if frozenScreenImages.isEmpty {
+            // Live-select mode: capture now
+            image = ScreenshotCapturer.capture(request: request)
+        } else {
+            // Freeze-first mode: crop from pre-captured image
+            image = ScreenshotCapturer.cropFromFrozen(request: request, frozenImages: frozenScreenImages)
+        }
+
+        guard let image else {
             NSSound.beep()
             cancelSelectionMode()
             return
@@ -327,6 +387,22 @@ enum ScreenshotCapturer {
         }
     }
 
+    /// Crop from a pre-captured frozen full-screen image.
+    @MainActor
+    static func cropFromFrozen(request: ScreenshotCaptureRequest, frozenImages: [CGDirectDisplayID: CGImage]) -> NSImage? {
+        switch request {
+        case let .area(selection):
+            cropFrozenArea(selection: selection, frozenImages: frozenImages)
+
+        case let .display(selection):
+            cropFrozenDisplay(selection: selection, frozenImages: frozenImages)
+
+        case let .window(selection):
+            // Window capture in freeze-first mode: crop the window bounds from the frozen screen
+            cropFrozenWindow(selection: selection, frozenImages: frozenImages)
+        }
+    }
+
     @MainActor
     private static func captureArea(selection: ScreenSelection) -> NSImage? {
         let captureRect = selection.rect.integral
@@ -359,5 +435,67 @@ enum ScreenshotCapturer {
         }
 
         return NSImage(cgImage: image, size: selection.bounds.size)
+    }
+
+    // MARK: - Freeze-first cropping
+
+    @MainActor
+    private static func cropFrozenArea(selection: ScreenSelection, frozenImages: [CGDirectDisplayID: CGImage]) -> NSImage? {
+        guard let fullImage = frozenImages[selection.displayID] else { return nil }
+
+        let cropRect = CGRect(
+            x: selection.rect.minX * selection.scaleFactor,
+            y: selection.rect.minY * selection.scaleFactor,
+            width: selection.rect.width * selection.scaleFactor,
+            height: selection.rect.height * selection.scaleFactor
+        ).integral
+
+        guard let cropped = fullImage.cropping(to: cropRect) else { return nil }
+        return NSImage(cgImage: cropped, size: selection.rect.size)
+    }
+
+    @MainActor
+    private static func cropFrozenDisplay(selection: ScreenSelection, frozenImages: [CGDirectDisplayID: CGImage]) -> NSImage? {
+        guard let fullImage = frozenImages[selection.displayID] else { return nil }
+        return NSImage(cgImage: fullImage, size: selection.rect.size)
+    }
+
+    @MainActor
+    private static func cropFrozenWindow(selection: WindowCaptureSelection, frozenImages: [CGDirectDisplayID: CGImage]) -> NSImage? {
+        // Find which screen contains this window
+        let windowBounds = selection.bounds
+
+        for screen in NSScreen.screens {
+            guard let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
+                  let fullImage = frozenImages[displayID] else {
+                continue
+            }
+
+            let screenFrame = screen.frame
+            let scaleFactor = screen.backingScaleFactor
+
+            // Convert window bounds (CGWindowServer coords, top-left origin) to screen-local coords
+            let desktopTopEdge = NSScreen.screens.map(\.frame.maxY).max() ?? screenFrame.maxY
+            let windowCocoaY = desktopTopEdge - windowBounds.maxY
+            let localX = windowBounds.minX - screenFrame.minX
+            let localY = screenFrame.maxY - windowCocoaY - windowBounds.height
+
+            // Check if this window is on this screen
+            let localRect = CGRect(x: localX, y: localY, width: windowBounds.width, height: windowBounds.height)
+            let screenLocalBounds = CGRect(origin: .zero, size: screenFrame.size)
+            guard screenLocalBounds.intersects(localRect) else { continue }
+
+            let cropRect = CGRect(
+                x: localX * scaleFactor,
+                y: localY * scaleFactor,
+                width: windowBounds.width * scaleFactor,
+                height: windowBounds.height * scaleFactor
+            ).integral
+
+            guard let cropped = fullImage.cropping(to: cropRect) else { continue }
+            return NSImage(cgImage: cropped, size: windowBounds.size)
+        }
+
+        return nil
     }
 }

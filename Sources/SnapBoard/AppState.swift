@@ -27,6 +27,12 @@ final class AppState: ObservableObject {
             ThemeManager.shared.currentTheme = currentTheme
         }
     }
+    @Published var captureTimingMode: CaptureTimingMode {
+        didSet {
+            captureCoordinator.captureTimingMode = captureTimingMode
+            UserDefaults.standard.set(captureTimingMode.rawValue, forKey: "captureTimingMode")
+        }
+    }
 
     var dismissStatusPanel: (() -> Void)?
 
@@ -43,6 +49,11 @@ final class AppState: ObservableObject {
         displayHotKeyConfiguration = Self.loadHotKeyConfiguration(for: .display)
         historyHotKeyConfiguration = Self.loadHotKeyConfiguration(for: .history)
         currentTheme = ThemeManager.shared.currentTheme
+
+        let savedMode = UserDefaults.standard.string(forKey: "captureTimingMode")
+            .flatMap { CaptureTimingMode(rawValue: $0) } ?? .liveSelect
+        captureTimingMode = savedMode
+        captureCoordinator.captureTimingMode = savedMode
     }
 
     var framedHotKeyDisplay: String {
@@ -205,7 +216,7 @@ final class AppState: ObservableObject {
 
     func openHistory() {
         dismissStatusPanel?()
-        HistoryWindowController.present()
+        HistoryWindowController.present(appState: self)
     }
 
     func openSettings() {

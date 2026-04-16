@@ -5,7 +5,7 @@ import SwiftUI
 final class HistoryWindowController: NSWindowController {
     private static var shared: HistoryWindowController?
 
-    static func present() {
+    static func present(appState: AppState) {
         if shared == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
@@ -16,7 +16,10 @@ final class HistoryWindowController: NSWindowController {
             window.title = "截图历史"
             window.center()
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: HistoryView())
+            window.contentView = NSHostingView(
+                rootView: HistoryView()
+                    .environmentObject(appState)
+            )
             shared = HistoryWindowController(window: window)
         }
         shared?.showWindow(nil)
@@ -26,6 +29,7 @@ final class HistoryWindowController: NSWindowController {
 }
 
 private struct HistoryView: View {
+    @EnvironmentObject private var appState: AppState
     @ObservedObject private var history = ScreenshotHistory.shared
     @State private var selectedItem: HistoryItem?
     @State private var selectedIDs: Set<UUID> = []
@@ -51,7 +55,8 @@ private struct HistoryView: View {
                             isSelected: selectedIDs.contains(item.id),
                             onSelect: { selectedItem = item },
                             onToggleSelect: { toggleSelect(item) },
-                            onDelete: { history.remove(item) }
+                            onDelete: { history.remove(item) },
+                            onCopy: { copyImages(for: item) }
                         )
                     }
                 }
@@ -67,6 +72,14 @@ private struct HistoryView: View {
                         pinSelected()
                     } label: {
                         Label("钉住所选", systemImage: "pin")
+                    }
+                    .disabled(selectedIDs.isEmpty)
+                }
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        copySelected()
+                    } label: {
+                        Label("复制所选", systemImage: "doc.on.doc")
                     }
                     .disabled(selectedIDs.isEmpty)
                 }
@@ -95,10 +108,9 @@ private struct HistoryView: View {
     }
 
     private func pinSelected() {
-        let appState = (NSApp.delegate as? AppDelegate)?.appState
         history.items
             .filter { selectedIDs.contains($0.id) }
-            .forEach { appState?.pinImage($0.image) }
+            .forEach { appState.pinImage($0.image) }
         selectedIDs.removeAll()
     }
 
@@ -110,6 +122,29 @@ private struct HistoryView: View {
         }
         selectedIDs.removeAll()
     }
+
+    private func copySelected() {
+        let images = history.items.filter { selectedIDs.contains($0.id) }.map(\.image)
+        copyImagesToPasteboard(images)
+        selectedIDs.removeAll()
+    }
+
+    /// Copies images for a single item, or all selected items if this item is in the selection.
+    private func copyImages(for item: HistoryItem) {
+        if selectedIDs.contains(item.id), selectedIDs.count > 1 {
+            let images = history.items.filter { selectedIDs.contains($0.id) }.map(\.image)
+            copyImagesToPasteboard(images)
+            selectedIDs.removeAll()
+        } else {
+            copyImagesToPasteboard([item.image])
+        }
+    }
+
+    private func copyImagesToPasteboard(_ images: [NSImage]) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects(images)
+    }
 }
 
 private struct ThumbnailCell: View {
@@ -118,6 +153,7 @@ private struct ThumbnailCell: View {
     let onSelect: () -> Void
     let onToggleSelect: () -> Void
     let onDelete: () -> Void
+    let onCopy: () -> Void
 
     var body: some View {
         Button(action: onSelect) {
@@ -143,12 +179,23 @@ private struct ThumbnailCell: View {
                     .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
             )
             .overlay(alignment: .topTrailing) {
-                Button(action: onDelete) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                        .padding(6)
+                HStack(spacing: 2) {
+                    Button(action: onCopy) {
+                        Image(systemName: "doc.on.doc")
+                            .foregroundStyle(.secondary)
+                            .padding(6)
+                    }
+                    .buttonStyle(.plain)
+                    .help("复制")
+
+                    Button(action: onDelete) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                            .padding(6)
+                    }
+                    .buttonStyle(.plain)
+                    .help("删除")
                 }
-                .buttonStyle(.plain)
             }
             .overlay(alignment: .topLeading) {
                 Button(action: onToggleSelect) {
@@ -160,11 +207,24 @@ private struct ThumbnailCell: View {
             }
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                onCopy()
+            } label: {
+                Label("复制", systemImage: "doc.on.doc")
+            }
+            Button {
+                onDelete()
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
     }
 }
 
 private struct ImagePreviewView: View {
     let item: HistoryItem
+    @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -175,8 +235,7 @@ private struct ImagePreviewView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
-                    let appState = (NSApp.delegate as? AppDelegate)?.appState
-                    appState?.pinImage(item.image)
+                    appState.pinImage(item.image)
                     dismiss()
                 } label: {
                     Label("钉住", systemImage: "pin")
@@ -204,6 +263,11 @@ private struct ZoomableImageView: NSViewRepresentable {
         scrollView.maxMagnification = 20
         scrollView.backgroundColor = .windowBackgroundColor
 
+        // Use centering clip view so the image stays centered when smaller than viewport
+        let clipView = CenteringClipView()
+        clipView.drawsBackground = false
+        scrollView.contentView = clipView
+
         let imageView = NSImageView(image: image)
         imageView.imageScaling = .scaleNone
         imageView.frame = CGRect(origin: .zero, size: image.size)
@@ -215,17 +279,31 @@ private struct ZoomableImageView: NSViewRepresentable {
             guard viewSize.width > 0, viewSize.height > 0, image.size.width > 0, image.size.height > 0 else { return }
             let scale = min(viewSize.width / image.size.width, viewSize.height / image.size.height)
             scrollView.magnification = scale
-            // center the document
-            let docSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-            let x = max((viewSize.width - docSize.width) / 2, 0)
-            let y = max((viewSize.height - docSize.height) / 2, 0)
-            scrollView.documentView?.scroll(CGPoint(x: -x, y: -y))
         }
 
         return scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {}
+}
+
+/// A clip view that centers the document when the document is smaller than the visible area.
+private final class CenteringClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        guard let documentView = documentView else { return rect }
+
+        let docFrame = documentView.frame
+
+        if docFrame.width < rect.width {
+            rect.origin.x = (docFrame.width - rect.width) / 2
+        }
+        if docFrame.height < rect.height {
+            rect.origin.y = (docFrame.height - rect.height) / 2
+        }
+
+        return rect
+    }
 }
 
 private final class MagnifyScrollView: NSScrollView {

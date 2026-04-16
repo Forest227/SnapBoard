@@ -10,6 +10,7 @@ final class SelectionOverlayWindowController: NSWindowController {
         screen: NSScreen,
         mode: CaptureSelectionMode,
         hotKeyHint: String,
+        frozenImage: CGImage?,
         captureHandler: @escaping (ScreenshotCaptureRequest) -> Void,
         cancelHandler: @escaping () -> Void
     ) {
@@ -38,6 +39,7 @@ final class SelectionOverlayWindowController: NSWindowController {
             screen: screen,
             mode: mode,
             hotKeyHint: hotKeyHint,
+            frozenImage: frozenImage,
             captureHandler: captureHandler,
             cancelHandler: cancelHandler
         )
@@ -83,6 +85,7 @@ private final class SelectionOverlayCanvasView: NSView {
     private let mode: CaptureSelectionMode
     private let hotKeyHint: String
     private let dockDisplayName: String
+    private let frozenImage: CGImage?
     private let captureHandler: (ScreenshotCaptureRequest) -> Void
     private let cancelHandler: () -> Void
 
@@ -98,12 +101,14 @@ private final class SelectionOverlayCanvasView: NSView {
         screen: NSScreen,
         mode: CaptureSelectionMode,
         hotKeyHint: String,
+        frozenImage: CGImage?,
         captureHandler: @escaping (ScreenshotCaptureRequest) -> Void,
         cancelHandler: @escaping () -> Void
     ) {
         self.screen = screen
         self.mode = mode
         self.hotKeyHint = hotKeyHint
+        self.frozenImage = frozenImage
         dockDisplayName = Self.resolveDockDisplayName()
         self.captureHandler = captureHandler
         self.cancelHandler = cancelHandler
@@ -287,8 +292,18 @@ private final class SelectionOverlayCanvasView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.clear.setFill()
-        dirtyRect.fill()
+        // In freeze-first mode, draw the frozen screenshot as background
+        if let frozenImage, let context = NSGraphicsContext.current?.cgContext {
+            context.saveGState()
+            // NSView is flipped, so we need to flip the drawing
+            context.translateBy(x: 0, y: bounds.height)
+            context.scaleBy(x: 1, y: -1)
+            context.draw(frozenImage, in: CGRect(origin: .zero, size: bounds.size))
+            context.restoreGState()
+        } else {
+            NSColor.clear.setFill()
+            dirtyRect.fill()
+        }
 
         let overlayPath = NSBezierPath(rect: bounds)
 
