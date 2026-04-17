@@ -1,7 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
-import CoreImage
-import CoreImage.CIFilterBuiltins
+@preconcurrency import CoreImage
+@preconcurrency import CoreImage.CIFilterBuiltins
 import SwiftUI
 import Vision
 
