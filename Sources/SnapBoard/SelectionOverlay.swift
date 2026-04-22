@@ -45,6 +45,11 @@ final class SelectionOverlayWindowController: NSWindowController {
         )
         window.contentView = contentView
 
+        if frozenImage != nil {
+            window.isOpaque = true
+            contentView.display()
+        }
+
         super.init(window: window)
     }
 
