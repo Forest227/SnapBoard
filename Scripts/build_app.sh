@@ -32,7 +32,12 @@ if [[ -f "$APP_ICON" ]]; then
 fi
 chmod +x "$MACOS_DIR/$APP_NAME"
 
-codesign --force --sign - "$APP_BUNDLE" >/dev/null
+SIGN_IDENTITY="SnapBoard Dev"
+if security find-identity -v -p codesigning | grep -q "$SIGN_IDENTITY"; then
+  codesign --force --sign "$SIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
+else
+  codesign --force --sign - "$APP_BUNDLE" >/dev/null
+fi
 codesign --verify --deep --strict "$APP_BUNDLE"
 
 echo "$APP_BUNDLE"
