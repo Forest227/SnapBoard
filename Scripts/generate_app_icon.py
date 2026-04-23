@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import subprocess
 from pathlib import Path
 
@@ -34,11 +35,12 @@ def main() -> None:
 
 def build_icon(size: int) -> Image.Image:
     scale = 4
-    render_size = size * scale
-    base = make_background(render_size)
-    draw_ambient_light(base)
-    draw_card(base, scale=scale)
-    mask = rounded_mask(render_size, CORNER_RADIUS * scale)
+    rs = size * scale
+    base = make_background(rs)
+    draw_glass_card(base, scale)
+    draw_crosshair(base, scale)
+    draw_crop_marks(base, scale)
+    mask = rounded_mask(rs, CORNER_RADIUS * scale)
     base.putalpha(mask)
     return base.resize((size, size), Image.Resampling.LANCZOS)
 
@@ -47,11 +49,11 @@ def make_background(size: int) -> Image.Image:
     image = Image.new("RGBA", (size, size), (0, 0, 0, 255))
     pixels = image.load()
 
-    # Deeper, richer dark background: near-black with teal hint bottom-right
-    tl = (10, 14, 20)
-    tr = (12, 20, 26)
-    bl = (16, 22, 32)
-    br = (18, 52, 56)
+    # Vibrant gradient: purple-blue top-left to teal-cyan bottom-right
+    tl = (88, 40, 180)
+    tr = (40, 80, 200)
+    bl = (60, 50, 160)
+    br = (20, 160, 180)
 
     for y in range(size):
         ny = y / (size - 1)
@@ -61,92 +63,128 @@ def make_background(size: int) -> Image.Image:
             lower = lerp_color(bl, br, nx)
             pixels[x, y] = (*lerp_color(upper, lower, ny), 255)
 
-    # Subtle vignette
-    vig = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    ImageDraw.Draw(vig).ellipse((-80, -60, size + 120, size + 180), fill=(0, 0, 0, 100))
-    vig = vig.filter(ImageFilter.GaussianBlur(100))
-    image.alpha_composite(vig)
+    # Soft colored orbs for depth
+    orbs = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(orbs)
+    draw.ellipse((-100, -200, size // 2 + 200, size // 2), fill=(130, 80, 240, 50))
+    draw.ellipse((size // 2 - 100, size // 2, size + 200, size + 200), fill=(0, 200, 200, 45))
+    draw.ellipse((size // 3, -100, size * 2 // 3 + 300, size // 3 + 200), fill=(200, 100, 255, 30))
+    orbs = orbs.filter(ImageFilter.GaussianBlur(size // 6))
+    image.alpha_composite(orbs)
+
     return image
 
 
-def draw_ambient_light(image: Image.Image) -> None:
-    glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(glow)
-
-    # Top-left cool blue-white glow
-    draw.ellipse((-60, -80, 480, 460), fill=(140, 200, 255, 28))
-    # Bottom-right teal glow
-    draw.ellipse((580, 560, 1100, 1100), fill=(40, 200, 160, 36))
-    # Center subtle warm highlight
-    draw.ellipse((300, 200, 780, 680), fill=(255, 255, 255, 10))
-
-    glow = glow.filter(ImageFilter.GaussianBlur(90))
-    image.alpha_composite(glow)
-
-
-def draw_card(image: Image.Image, scale: int = 1) -> None:
+def draw_glass_card(image: Image.Image, s: int) -> None:
     size = image.size[0]
-    s = scale
+    cx, cy = size // 2, size // 2 + 12 * s
+    half = 240 * s
+    rect = (cx - half, cy - half, cx + half, cy + half)
+    radius = 72 * s
 
-    # Card bounds — centered, slightly lower for visual balance
-    cx, cy = size // 2, size // 2 + 30 * s
-    half_w, half_h = 268 * s, 268 * s
-    card_rect = (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
-    radius = 96 * s
+    # Capture the background region for the "frosted" effect
+    card_region = image.crop(rect)
+    blurred = card_region.filter(ImageFilter.GaussianBlur(28 * s))
+
+    # Brighten + desaturate the blurred region to simulate frosted glass
+    frost_tint = Image.new("RGBA", blurred.size, (255, 255, 255, 100))
+    blurred.alpha_composite(frost_tint)
+
+    # Create rounded mask for the glass card
+    card_w = rect[2] - rect[0]
+    card_h = rect[3] - rect[1]
+    card_mask = Image.new("L", (card_w, card_h), 0)
+    ImageDraw.Draw(card_mask).rounded_rectangle(
+        (0, 0, card_w, card_h), radius=radius, fill=255
+    )
 
     # Drop shadow
-    shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     ImageDraw.Draw(shadow).rounded_rectangle(
-        (card_rect[0] + 12*s, card_rect[1] + 18*s, card_rect[2] + 12*s, card_rect[3] + 18*s),
-        radius=radius, fill=(0, 0, 0, 160)
+        (rect[0] + 8 * s, rect[1] + 12 * s, rect[2] + 8 * s, rect[3] + 12 * s),
+        radius=radius, fill=(0, 0, 0, 80),
     )
-    shadow = shadow.filter(ImageFilter.GaussianBlur(40 * s))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(24 * s))
     image.alpha_composite(shadow)
 
-    card = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    card_draw = ImageDraw.Draw(card)
-    card_draw.rounded_rectangle(card_rect, radius=radius, fill=(235, 245, 248, 245))
-    sheen = make_card_sheen(card_rect, image.size, radius)
-    card.alpha_composite(sheen)
-    card_draw.rounded_rectangle(card_rect, radius=radius, outline=(255, 255, 255, 140), width=3*s)
-    image.alpha_composite(card)
+    # Composite the frosted glass onto the image
+    glass = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    glass_card = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
+    glass_card.paste(blurred, mask=card_mask)
+    glass.paste(glass_card, (rect[0], rect[1]))
+    image.alpha_composite(glass)
 
-    draw_capture_marks(image, card_rect, s)
-    draw_pin(image, card_rect, s)
+    # Inner white tint for glass feel
+    tint = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    tint_draw = ImageDraw.Draw(tint)
+    tint_draw.rounded_rectangle(rect, radius=radius, fill=(255, 255, 255, 35))
+    image.alpha_composite(tint)
+
+    # Top highlight (specular reflection on glass)
+    highlight = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    hl_draw = ImageDraw.Draw(highlight)
+    hl_rect = (rect[0] + 20 * s, rect[1] + 8 * s, rect[2] - 20 * s, rect[1] + half // 2)
+    hl_draw.rounded_rectangle(hl_rect, radius=radius // 2, fill=(255, 255, 255, 40))
+    highlight = highlight.filter(ImageFilter.GaussianBlur(16 * s))
+    # Clip to card shape
+    hl_mask_full = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(hl_mask_full).rounded_rectangle(rect, radius=radius, fill=255)
+    highlight.putalpha(
+        Image.composite(highlight.split()[3], Image.new("L", (size, size), 0), hl_mask_full)
+    )
+    image.alpha_composite(highlight)
+
+    # Border: thin white outline for glass edge
+    border = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    ImageDraw.Draw(border).rounded_rectangle(
+        rect, radius=radius, outline=(255, 255, 255, 80), width=3 * s
+    )
+    image.alpha_composite(border)
 
 
-def make_card_sheen(rect, canvas_size, radius) -> Image.Image:
-    layer = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
-    x0, y0, x1, y1 = rect
-    w, h = x1 - x0, y1 - y0
-
-    grad = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    px = grad.load()
-    for y in range(h):
-        t = y / max(h - 1, 1)
-        # Top: bright white sheen, fades to very light teal-white
-        alpha = int(lerp(100, 0, t))
-        color = lerp_color((255, 255, 255), (220, 238, 240), t)
-        for x in range(w):
-            px[x, y] = (*color, alpha)
-
-    mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w, h), radius=radius, fill=255)
-    grad.putalpha(mask)
-    layer.alpha_composite(grad, dest=(x0, y0))
-    return layer
-
-
-def draw_capture_marks(image: Image.Image, card_rect, s: int = 1) -> None:
-    layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+def draw_crosshair(image: Image.Image, s: int) -> None:
+    size = image.size[0]
+    cx, cy = size // 2, size // 2 + 12 * s
+    layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
 
-    x0, y0, x1, y1 = card_rect
-    inset = 88 * s
-    arm = 80 * s
-    stroke = 28 * s
-    color = (22, 196, 148, 255)
+    line_len = 80 * s
+    gap = 18 * s
+    stroke = 6 * s
+    color = (255, 255, 255, 180)
 
+    # Horizontal lines
+    draw.line([(cx - gap - line_len, cy), (cx - gap, cy)], fill=color, width=stroke)
+    draw.line([(cx + gap, cy), (cx + gap + line_len, cy)], fill=color, width=stroke)
+    # Vertical lines
+    draw.line([(cx, cy - gap - line_len), (cx, cy - gap)], fill=color, width=stroke)
+    draw.line([(cx, cy + gap), (cx, cy + gap + line_len)], fill=color, width=stroke)
+
+    # Center dot
+    dot_r = 8 * s
+    draw.ellipse(
+        (cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r),
+        fill=(255, 255, 255, 140),
+    )
+
+    image.alpha_composite(layer)
+
+
+def draw_crop_marks(image: Image.Image, s: int) -> None:
+    size = image.size[0]
+    cx, cy = size // 2, size // 2 + 12 * s
+    half = 240 * s
+    rect = (cx - half, cy - half, cx + half, cy + half)
+
+    layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+
+    inset = 40 * s
+    arm = 72 * s
+    stroke = 20 * s
+    color = (255, 255, 255, 230)
+
+    x0, y0, x1, y1 = rect
     left = x0 + inset
     top = y0 + inset
     right = x1 - inset
@@ -162,57 +200,10 @@ def draw_capture_marks(image: Image.Image, card_rect, s: int = 1) -> None:
     for start, pivot, end in corners:
         draw.line([start, pivot, end], fill=color, width=stroke, joint="curve")
 
-    layer = layer.filter(ImageFilter.GaussianBlur(0.8))
+    # Subtle glow
+    glow = layer.filter(ImageFilter.GaussianBlur(4 * s))
+    image.alpha_composite(glow)
     image.alpha_composite(layer)
-
-
-def draw_pin(image: Image.Image, card_rect, s: int = 1) -> None:
-    import math
-    x0, y0, x1, y1 = card_rect
-
-    head_r = 56 * s
-    bronze = (218, 162, 96, 255)
-    bronze_rim = (248, 210, 160, 180)
-    shaft_color = (28, 34, 44, 255)
-
-    cx = x1 + 10 * s
-    cy = y0 - 10 * s
-    entry_x = x1 - 30 * s
-    entry_y = y0 + 30 * s
-
-    # Direction unit vector
-    dx = entry_x - cx
-    dy = entry_y - cy
-    dist = math.hypot(dx, dy)
-    nx, ny = dx / dist, dy / dist
-
-    # Shaft start: just outside head
-    sx = int(cx + nx * (head_r - 8 * s))
-    sy = int(cy + ny * (head_r - 8 * s))
-
-    ex = int(entry_x + nx * 50 * s)
-    ey = int(entry_y + ny * 50 * s)
-
-    shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    ImageDraw.Draw(shadow).ellipse(
-        (cx - head_r + 8*s, cy - head_r + 10*s, cx + head_r + 8*s, cy + head_r + 10*s),
-        fill=(0, 0, 0, 120)
-    )
-    shadow = shadow.filter(ImageFilter.GaussianBlur(16 * s))
-    image.alpha_composite(shadow)
-
-    shaft_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    shaft_draw = ImageDraw.Draw(shaft_layer)
-    shaft_draw.line([(sx, sy), (ex, ey)], fill=shaft_color, width=18 * s)
-    shaft_draw.ellipse((ex - 6*s, ey - 6*s, ex + 6*s, ey + 6*s), fill=shaft_color)
-    shaft_layer = shaft_layer.filter(ImageFilter.GaussianBlur(1.5 * s))
-    image.alpha_composite(shaft_layer)
-
-    head_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    head_draw = ImageDraw.Draw(head_layer)
-    head_draw.ellipse((cx - head_r, cy - head_r, cx + head_r, cy + head_r),
-                      fill=bronze, outline=bronze_rim, width=5 * s)
-    image.alpha_composite(head_layer)
 
 
 def export_iconset(master: Image.Image) -> None:
@@ -236,7 +227,9 @@ def export_iconset(master: Image.Image) -> None:
 
 def rounded_mask(size: int, radius: int) -> Image.Image:
     mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, size, size), radius=radius, fill=255)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, size, size), radius=radius, fill=255
+    )
     return mask
 
 

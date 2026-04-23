@@ -22,7 +22,7 @@ func checkForPreviousCrashLog() {
 
 private let crashLogDirectory: URL = {
     let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    return appSupport.appendingPathComponent("SnapBoard", isDirectory: true)
+    return appSupport.appendingPathComponent("SnapX", isDirectory: true)
 }()
 
 private let crashLogPath: URL = crashLogDirectory.appendingPathComponent("last_crash.log")
@@ -59,7 +59,7 @@ private func signalHandler(sig: Int32) {
         }
     }
 
-    writeStr("=== SnapBoard Crash Report ===\n")
+    writeStr("=== SnapX Crash Report ===\n")
     writeStr("Signal: ")
     writeInt(sig)
     writeStr(" (")
@@ -133,7 +133,7 @@ private final class CrashReporter {
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "SnapBoard \u{4E0A}\u{6B21}\u{5F02}\u{5E38}\u{9000}\u{51FA}"
+        alert.messageText = "SnapX \u{4E0A}\u{6B21}\u{5F02}\u{5E38}\u{9000}\u{51FA}"
         alert.informativeText = "检测到上次运行时发生了崩溃，是否将崩溃日志保存到\u{300C}下载\u{300D}文件夹？"
         alert.addButton(withTitle: "保存日志")
         alert.addButton(withTitle: "忽略")
@@ -157,7 +157,7 @@ private final class CrashReporter {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
         let timestamp = formatter.string(from: Date())
-        let fileName = "SnapBoard_Crash_\(timestamp).log"
+        let fileName = "SnapX_Crash_\(timestamp).log"
         let destination = downloads.appendingPathComponent(fileName)
 
         do {
@@ -194,7 +194,7 @@ private final class CrashReporter {
 
     private static nonisolated func buildExceptionReport(_ exception: NSException) -> String {
         var lines: [String] = []
-        lines.append("=== SnapBoard Crash Report ===")
+        lines.append("=== SnapX Crash Report ===")
         lines.append("Date: \(ISO8601DateFormatter().string(from: Date()))")
         lines.append("Exception: \(exception.name.rawValue)")
         lines.append("Reason: \(exception.reason ?? "unknown")")

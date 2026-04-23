@@ -3,20 +3,20 @@
 import PackageDescription
 
 let package = Package(
-    name: "SnapBoard",
+    name: "SnapX",
     platforms: [
         .macOS(.v13),
     ],
     products: [
         .executable(
-            name: "SnapBoard",
-            targets: ["SnapBoard"]
+            name: "SnapX",
+            targets: ["SnapX"]
         ),
     ],
     targets: [
         .executableTarget(
-            name: "SnapBoard",
-            path: "Sources/SnapBoard"
+            name: "SnapX",
+            path: "Sources/SnapX"
         ),
     ]
 )

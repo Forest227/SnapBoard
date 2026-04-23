@@ -72,7 +72,7 @@ struct SettingsView: View {
                 .font(.system(size: 15, weight: .semibold))
 
             HStack(alignment: .top, spacing: 16) {
-                Text("登录 macOS 时自动启动 SnapBoard")
+                Text("登录 macOS 时自动启动 SnapX")
                     .font(.system(size: 15, weight: .semibold))
                     .frame(maxWidth: .infinity, alignment: .leading)
 

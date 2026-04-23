@@ -31,9 +31,9 @@ struct MenuBarContentView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("SnapBoard")
+            Text("SnapX")
                 .font(.system(size: 20, weight: .semibold, design: .rounded))
-            Text("像 Snipaste 一样，抬手就截，复制后可一键钉住。")
+            Text("快速截屏、标注、钉图")
                 .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(.secondary)
         }
@@ -134,13 +134,13 @@ struct MenuBarContentView: View {
             .buttonStyle(.borderless)
 
             Button(action: appState.restart) {
-                Label("重启 SnapBoard", systemImage: "arrow.clockwise.circle")
+                Label("重启 SnapX", systemImage: "arrow.clockwise.circle")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderless)
 
             Button(action: appState.quit) {
-                Label("退出 SnapBoard", systemImage: "power")
+                Label("退出 SnapX", systemImage: "power")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderless)
@@ -208,13 +208,8 @@ struct MenuBarContentView: View {
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("当前钉图 \(appState.pinnedCount) 张")
-                .font(.system(size: 12.5, weight: .semibold))
-            Text("框选截图会先锁定指针所在窗口；单击确认窗口，拖动则切换为区域截图。")
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-        }
+        Text("当前钉图 \(appState.pinnedCount) 张")
+            .font(.system(size: 12.5, weight: .semibold))
     }
 
     private var allPermissionsGranted: Bool {

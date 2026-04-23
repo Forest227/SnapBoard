@@ -14,14 +14,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         super.init(window: window)
 
-        window.title = "SnapBoard 设置"
+        window.title = "SnapX 设置"
         window.titlebarAppearsTransparent = false
         window.isReleasedWhenClosed = false
         window.minSize = CGSize(width: 430, height: 500)
         window.center()
         window.contentView = hostingView
         window.delegate = self
-        window.setFrameAutosaveName("SnapBoardSettingsWindow")
+        window.setFrameAutosaveName("SnapXSettingsWindow")
     }
 
     @available(*, unavailable)

@@ -100,6 +100,11 @@ final class CaptureCoordinator {
     private var framedHotKeyHint = "⌘⇧S"
     private var displayHotKeyHint = "⌘⇧F"
     var captureTimingMode: CaptureTimingMode = .liveSelect
+    private var frozenScreenImages: [CGDirectDisplayID: CGImage] = [:]
+    private lazy var captureSound: NSSound? = {
+        guard let url = Bundle.main.url(forResource: "capture", withExtension: "wav") else { return nil }
+        return NSSound(contentsOf: url, byReference: true)
+    }()
 
     var hasScreenCapturePermission: Bool {
         CGPreflightScreenCaptureAccess()
@@ -116,7 +121,7 @@ final class CaptureCoordinator {
     func presentScreenRecordingHelp() {
         let alert = NSAlert()
         alert.messageText = "需要屏幕录制权限"
-        alert.informativeText = "SnapBoard 需要屏幕录制权限才能截图。授权后重新点击菜单栏按钮，或按快捷键 \(allHotKeyHints)。"
+        alert.informativeText = "SnapX 需要屏幕录制权限才能截图。授权后重新点击菜单栏按钮，或按快捷键 \(allHotKeyHints)。"
         alert.addButton(withTitle: "打开系统设置")
         alert.addButton(withTitle: "稍后")
 
@@ -139,8 +144,10 @@ final class CaptureCoordinator {
     private func beginSelectionMode(for mode: CaptureSelectionMode) {
         guard overlayWindowControllers.isEmpty else { return }
 
+        captureSound?.play()
+
         // In freeze-first mode, capture all screens before showing overlay
-        var frozenScreenImages: [CGDirectDisplayID: CGImage] = [:]
+        frozenScreenImages = [:]
         if captureTimingMode == .freezeFirst {
             for screen in NSScreen.screens {
                 guard let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
@@ -163,7 +170,7 @@ final class CaptureCoordinator {
                 hotKeyHint: hotKeyHint,
                 frozenImage: frozenImage,
                 captureHandler: { [weak self] request in
-                    self?.finishCapture(with: request, frozenScreenImages: frozenScreenImages)
+                    self?.finishCapture(with: request)
                 },
                 cancelHandler: { [weak self] in
                     self?.cancelSelectionMode()
@@ -180,6 +187,7 @@ final class CaptureCoordinator {
     func cancelSelectionMode() {
         overlayWindowControllers.forEach { $0.close() }
         overlayWindowControllers.removeAll()
+        frozenScreenImages = [:]
         popCrosshairCursor()
     }
 
@@ -215,7 +223,7 @@ final class CaptureCoordinator {
         "\(framedHotKeyHint) / \(displayHotKeyHint)"
     }
 
-    private func finishCapture(with request: ScreenshotCaptureRequest, frozenScreenImages: [CGDirectDisplayID: CGImage] = [:]) {
+    private func finishCapture(with request: ScreenshotCaptureRequest) {
         // For display capture, overlay covers the whole screen so must hide first
         if case .display = request {
             overlayWindowControllers.forEach { $0.window?.orderOut(nil) }
@@ -285,6 +293,7 @@ final class CaptureCoordinator {
             index == targetIndex ? nil : controller
         }
         overlayWindowControllers.removeAll()
+        frozenScreenImages = [:]
 
         controllersToClose.forEach { $0.close() }
 

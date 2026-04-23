@@ -1,7 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
-@preconcurrency import CoreImage
-@preconcurrency import CoreImage.CIFilterBuiltins
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import SwiftUI
 import Vision
 
@@ -64,9 +64,6 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
         window.ignoresMouseEvents = false
         window.setFrame(layout.screenFrame, display: true)
 
-        // Apply theme
-        ThemeManager.shared.applyTheme(to: window)
-
         let rootView = ScreenshotEditorRootView(
             viewModel: viewModel,
             layout: layout,
@@ -86,7 +83,6 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
                 self?.extractTextFromImage()
             }
         )
-        .preferredColorScheme(ThemeManager.shared.currentTheme.colorScheme)
 
         window.contentView = NSHostingView(rootView: rootView)
     }
@@ -100,11 +96,6 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
                 return nil
             }
 
-            if event.keyCode == UInt16(kVK_Return) {
-                self.completeEditing()
-                return nil
-            }
-
             let commandFlags: NSEvent.ModifierFlags = [.command]
             if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == commandFlags,
                event.charactersIgnoringModifiers?.lowercased() == "z" {
@@ -112,7 +103,7 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
                 return nil
             }
 
-            // Tool switching shortcuts (1-7)
+            // Tool switching shortcuts (1-5)
             if let character = event.charactersIgnoringModifiers?.first {
                 switch character {
                 case "1":
@@ -128,12 +119,6 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
                     self.viewModel.activeTool = .arrow
                     return nil
                 case "5":
-                    self.viewModel.activeTool = .line
-                    return nil
-                case "6":
-                    self.viewModel.activeTool = .pen
-                    return nil
-                case "7":
                     self.viewModel.activeTool = .mosaic
                     return nil
                 default:
@@ -186,7 +171,6 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
-            request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
 
             do {
                 let handler = VNImageRequestHandler(cgImage: cgImage)
@@ -372,10 +356,8 @@ private final class ScreenshotEditorViewModel: ObservableObject {
     @Published var activeTool: ScreenshotEditorTool = .rectangle
     @Published var selectedColor: ScreenshotAnnotationColor = .red
     @Published var selectedLineStyle: RectangleLineStyle = .solid
-    @Published var textFontSize: CGFloat = 24
-    @Published var textIsBold: Bool = false
-    @Published var textIsItalic: Bool = false
-    @Published var textIsUnderline: Bool = false
+    @Published var textHasBackground: Bool = true
+    @Published var textBackgroundColor: ScreenshotAnnotationColor = .yellow
     @Published var annotations: [ScreenshotEditorAnnotation] = []
     @Published var isExtractingText = false
     @Published var toastMessage: String?
@@ -421,8 +403,6 @@ private enum ScreenshotEditorTool: String, CaseIterable, Identifiable {
     case highlight
     case text
     case arrow
-    case line
-    case pen
     case mosaic
 
     var id: String { rawValue }
@@ -432,15 +412,11 @@ private enum ScreenshotEditorTool: String, CaseIterable, Identifiable {
         case .rectangle:
             "square"
         case .highlight:
-            "rectangle.and.pencil.and.ellipsis"
+            "highlighter"
         case .text:
-            "t.square"
+            "textformat"
         case .arrow:
             "arrow.up.right"
-        case .line:
-            "line.diagonal"
-        case .pen:
-            "pencil"
         case .mosaic:
             "square.grid.3x3.fill"
         }
@@ -456,10 +432,6 @@ private enum ScreenshotEditorTool: String, CaseIterable, Identifiable {
             "文字"
         case .arrow:
             "箭头"
-        case .line:
-            "直线"
-        case .pen:
-            "画笔"
         case .mosaic:
             "马赛克"
         }
@@ -469,7 +441,7 @@ private enum ScreenshotEditorTool: String, CaseIterable, Identifiable {
         switch self {
         case .mosaic:
             false
-        case .rectangle, .highlight, .text, .arrow, .line, .pen:
+        case .rectangle, .highlight, .text, .arrow:
             true
         }
     }
@@ -480,9 +452,7 @@ private enum ScreenshotEditorTool: String, CaseIterable, Identifiable {
         case .highlight: "2"
         case .text: "3"
         case .arrow: "4"
-        case .line: "5"
-        case .pen: "6"
-        case .mosaic: "7"
+        case .mosaic: "5"
         }
     }
 }
@@ -570,30 +540,14 @@ private struct ArrowAnnotation {
     let lineWidth: CGFloat
 }
 
-private struct LineAnnotation {
-    let id = UUID()
-    let start: CGPoint
-    let end: CGPoint
-    let color: ScreenshotAnnotationColor
-    let lineWidth: CGFloat
-}
-
-private struct PenAnnotation {
-    let id = UUID()
-    let points: [CGPoint]
-    let color: ScreenshotAnnotationColor
-    let lineWidth: CGFloat
-}
-
 private struct TextAnnotation {
     let id = UUID()
     let origin: CGPoint
     let text: String
     let color: ScreenshotAnnotationColor
     let fontSize: CGFloat
-    let isBold: Bool
-    let isItalic: Bool
-    let isUnderline: Bool
+    let hasBackground: Bool
+    let backgroundColor: ScreenshotAnnotationColor
 }
 
 private struct MosaicAnnotation {
@@ -606,8 +560,6 @@ private enum ScreenshotEditorAnnotation: Identifiable {
     case rectangle(RectangleAnnotation)
     case highlight(HighlightAnnotation)
     case arrow(ArrowAnnotation)
-    case line(LineAnnotation)
-    case pen(PenAnnotation)
     case text(TextAnnotation)
     case mosaic(MosaicAnnotation)
 
@@ -616,8 +568,6 @@ private enum ScreenshotEditorAnnotation: Identifiable {
         case let .rectangle(annotation): annotation.id
         case let .highlight(annotation): annotation.id
         case let .arrow(annotation): annotation.id
-        case let .line(annotation): annotation.id
-        case let .pen(annotation): annotation.id
         case let .text(annotation): annotation.id
         case let .mosaic(annotation): annotation.id
         }
@@ -625,11 +575,6 @@ private enum ScreenshotEditorAnnotation: Identifiable {
 }
 
 private struct DraftArrow {
-    let start: CGPoint
-    let end: CGPoint
-}
-
-private struct DraftLine {
     let start: CGPoint
     let end: CGPoint
 }
@@ -648,8 +593,6 @@ private struct ScreenshotEditorRootView: View {
     @State private var draftRectangle: CGRect?
     @State private var draftHighlight: CGRect?
     @State private var draftArrow: DraftArrow?
-    @State private var draftLine: DraftLine?
-    @State private var draftPenPoints: [CGPoint] = []
     @State private var draftMosaicPoints: [CGPoint] = []
     @State private var draftTextOrigin: CGPoint?
     @State private var draftText = ""
@@ -658,8 +601,7 @@ private struct ScreenshotEditorRootView: View {
 
     private let rectangleLineWidth: CGFloat = 4
     private let arrowLineWidth: CGFloat = 4
-    private let lineLineWidth: CGFloat = 4
-    private let penLineWidth: CGFloat = 4
+    private let textFontSize: CGFloat = 24
     private let mosaicBrushSize: CGFloat = 28
     private let highlightOpacity: CGFloat = 0.35
 
@@ -675,7 +617,6 @@ private struct ScreenshotEditorRootView: View {
                 .offset(x: layout.imageRect.minX, y: layout.imageRect.minY)
 
             toolbar
-                .fixedSize()
                 .frame(width: layout.toolbarRect.width, height: layout.toolbarRect.height)
                 .offset(x: layout.toolbarRect.minX, y: layout.toolbarRect.minY)
 
@@ -683,18 +624,13 @@ private struct ScreenshotEditorRootView: View {
                 ToastView(message: toastMessage)
                     .padding(.top, 18)
                     .padding(.trailing, 18)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .top).combined(with: .opacity).animation(.spring(response: 0.35, dampingFraction: 0.75)),
-                        removal: .move(edge: .top).combined(with: .opacity).animation(.smooth(duration: 0.2))
-                    ))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: viewModel.toastMessage)
             }
 
             if showToolShortcuts {
                 ToolShortcutsOverlay()
-                    .transition(.asymmetric(
-                        insertion: .scale(scale: 0.9).combined(with: .opacity).animation(.spring(response: 0.4, dampingFraction: 0.75)),
-                        removal: .scale(scale: 0.95).combined(with: .opacity).animation(.smooth(duration: 0.2))
-                    ))
+                    .transition(.opacity)
             }
         }
         .frame(width: layout.screenSize.width, height: layout.screenSize.height)
@@ -703,11 +639,11 @@ private struct ScreenshotEditorRootView: View {
             commitTextDraftIfNeeded()
         }
         .onAppear {
-            withAnimation(.smooth(duration: 0.25).delay(0.05)) {
+            withAnimation(.easeInOut(duration: 0.25)) {
                 showToolShortcuts = true
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
-                withAnimation(.smooth(duration: 0.25)) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                withAnimation(.easeOut(duration: 0.3)) {
                     showToolShortcuts = false
                 }
             }
@@ -746,7 +682,7 @@ private struct ScreenshotEditorRootView: View {
         .gesture(dragGesture)
         .simultaneousGesture(tapGesture)
         .onTapGesture(count: 2) {
-            onDone()
+            completeEditing()
         }
     }
 
@@ -770,19 +706,6 @@ private struct ScreenshotEditorRootView: View {
                 )
             }
 
-            if let draftHighlight {
-                let path = Path(roundedRect: draftHighlight, cornerRadius: 4)
-                context.fill(
-                    path,
-                    with: .color(viewModel.selectedColor.swiftUIColor.opacity(highlightOpacity))
-                )
-                context.stroke(
-                    path,
-                    with: .color(viewModel.selectedColor.swiftUIColor),
-                    style: StrokeStyle(lineWidth: 1)
-                )
-            }
-
             if let draftArrow {
                 let path = arrowPath(
                     start: draftArrow.start,
@@ -794,40 +717,6 @@ private struct ScreenshotEditorRootView: View {
                     with: .color(viewModel.selectedColor.swiftUIColor),
                     style: StrokeStyle(
                         lineWidth: displayStrokeWidth(for: arrowLineWidth),
-                        lineCap: .round,
-                        lineJoin: .round
-                    )
-                )
-            }
-
-            if let draftLine {
-                var path = Path()
-                path.move(to: draftLine.start)
-                path.addLine(to: draftLine.end)
-                context.stroke(
-                    path,
-                    with: .color(viewModel.selectedColor.swiftUIColor),
-                    style: StrokeStyle(
-                        lineWidth: displayStrokeWidth(for: lineLineWidth),
-                        lineCap: .round,
-                        lineJoin: .round
-                    )
-                )
-            }
-
-            if !draftPenPoints.isEmpty {
-                var path = Path()
-                if let first = draftPenPoints.first {
-                    path.move(to: first)
-                    for point in draftPenPoints.dropFirst() {
-                        path.addLine(to: point)
-                    }
-                }
-                context.stroke(
-                    path,
-                    with: .color(viewModel.selectedColor.swiftUIColor),
-                    style: StrokeStyle(
-                        lineWidth: displayStrokeWidth(for: penLineWidth),
                         lineCap: .round,
                         lineJoin: .round
                     )
@@ -879,90 +768,6 @@ private struct ScreenshotEditorRootView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                }
-            }
-
-            if viewModel.activeTool == .text {
-                toolbarDivider
-
-                HStack(spacing: 6) {
-                    // Font size control
-                    Button {
-                        viewModel.textFontSize = max(12, viewModel.textFontSize - 4)
-                    } label: {
-                        Image(systemName: "textformat.size.smaller")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.9))
-                            .frame(width: 26, height: 26)
-                    }
-                    .buttonStyle(.plain)
-                    .help("减小字号")
-
-                    Text("\(Int(viewModel.textFontSize))")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.8))
-                        .frame(width: 24)
-
-                    Button {
-                        viewModel.textFontSize = min(72, viewModel.textFontSize + 4)
-                    } label: {
-                        Image(systemName: "textformat.size.larger")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.9))
-                            .frame(width: 26, height: 26)
-                    }
-                    .buttonStyle(.plain)
-                    .help("增大字号")
-
-                    toolbarDivider
-
-                    // Bold
-                    Button {
-                        viewModel.textIsBold.toggle()
-                    } label: {
-                        Image(systemName: "bold")
-                            .font(.system(size: 13, weight: viewModel.textIsBold ? .bold : .semibold))
-                            .foregroundStyle(viewModel.textIsBold ? Color.accentColor : Color.white.opacity(0.9))
-                            .frame(width: 26, height: 26)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(viewModel.textIsBold ? Color.white.opacity(0.9) : Color.clear)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .help("加粗")
-
-                    // Italic
-                    Button {
-                        viewModel.textIsItalic.toggle()
-                    } label: {
-                        Image(systemName: "italic")
-                            .font(.system(size: 13, weight: viewModel.textIsItalic ? .bold : .semibold))
-                            .foregroundStyle(viewModel.textIsItalic ? Color.accentColor : Color.white.opacity(0.9))
-                            .frame(width: 26, height: 26)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(viewModel.textIsItalic ? Color.white.opacity(0.9) : Color.clear)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .help("斜体")
-
-                    // Underline
-                    Button {
-                        viewModel.textIsUnderline.toggle()
-                    } label: {
-                        Image(systemName: "underline")
-                            .font(.system(size: 13, weight: viewModel.textIsUnderline ? .bold : .semibold))
-                            .foregroundStyle(viewModel.textIsUnderline ? Color.accentColor : Color.white.opacity(0.9))
-                            .frame(width: 26, height: 26)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(viewModel.textIsUnderline ? Color.white.opacity(0.9) : Color.clear)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .help("下划线")
                 }
             }
 
@@ -1047,7 +852,7 @@ private struct ScreenshotEditorRootView: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.9))
+                .foregroundStyle(buttonForeground(isSelected: isSelected, accent: false, isDisabled: false))
                 .padding(.horizontal, 14)
                 .frame(height: 30)
                 .background(
@@ -1104,28 +909,8 @@ private struct ScreenshotEditorRootView: View {
                         height: abs(current.y - start.y)
                     ).integral
 
-                case .highlight:
-                    draftHighlight = CGRect(
-                        x: min(start.x, current.x),
-                        y: min(start.y, current.y),
-                        width: abs(current.x - start.x),
-                        height: abs(current.y - start.y)
-                    ).integral
-
                 case .arrow:
                     draftArrow = DraftArrow(start: start, end: current)
-
-                case .line:
-                    draftLine = DraftLine(start: start, end: current)
-
-                case .pen:
-                    if draftPenPoints.isEmpty {
-                        draftPenPoints = [start]
-                    }
-                    if let last = draftPenPoints.last,
-                       hypot(last.x - current.x, last.y - current.y) >= 2 {
-                        draftPenPoints.append(current)
-                    }
 
                 case .mosaic:
                     if draftMosaicPoints.isEmpty {
@@ -1153,21 +938,7 @@ private struct ScreenshotEditorRootView: View {
                             RectangleAnnotation(
                                 rect: displayRectToImageRect(draftRectangle),
                                 color: viewModel.selectedColor,
-                                lineWidth: rectangleLineWidth,
-                                lineStyle: .solid
-                            )
-                        )
-                    )
-
-                case .highlight:
-                    defer { draftHighlight = nil }
-                    guard let draftHighlight, draftHighlight.width >= 8, draftHighlight.height >= 8 else { return }
-                    viewModel.addAnnotation(
-                        .highlight(
-                            HighlightAnnotation(
-                                rect: displayRectToImageRect(draftHighlight),
-                                color: viewModel.selectedColor,
-                                opacity: highlightOpacity
+                                lineWidth: rectangleLineWidth
                             )
                         )
                     )
@@ -1182,33 +953,6 @@ private struct ScreenshotEditorRootView: View {
                                 end: displayPointToImagePoint(end),
                                 color: viewModel.selectedColor,
                                 lineWidth: arrowLineWidth
-                            )
-                        )
-                    )
-
-                case .line:
-                    defer { draftLine = nil }
-                    guard hypot(end.x - start.x, end.y - start.y) >= 10 else { return }
-                    viewModel.addAnnotation(
-                        .line(
-                            LineAnnotation(
-                                start: displayPointToImagePoint(start),
-                                end: displayPointToImagePoint(end),
-                                color: viewModel.selectedColor,
-                                lineWidth: lineLineWidth
-                            )
-                        )
-                    )
-
-                case .pen:
-                    defer { draftPenPoints = [] }
-                    guard draftPenPoints.count >= 2 else { return }
-                    viewModel.addAnnotation(
-                        .pen(
-                            PenAnnotation(
-                                points: draftPenPoints.map(displayPointToImagePoint),
-                                color: viewModel.selectedColor,
-                                lineWidth: penLineWidth
                             )
                         )
                     )
@@ -1258,14 +1002,6 @@ private struct ScreenshotEditorRootView: View {
                     style: StrokeStyle(lineWidth: displayStrokeWidth(for: rectangle.lineWidth))
                 )
 
-            case let .highlight(highlight):
-                let rect = imageRectToDisplayRect(highlight.rect)
-                let path = Path(roundedRect: rect, cornerRadius: 4)
-                context.fill(
-                    path,
-                    with: .color(highlight.color.swiftUIColor.opacity(highlight.opacity))
-                )
-
             case let .arrow(arrow):
                 let path = arrowPath(
                     start: imagePointToDisplayPoint(arrow.start),
@@ -1282,55 +1018,12 @@ private struct ScreenshotEditorRootView: View {
                     )
                 )
 
-            case let .line(line):
-                var path = Path()
-                path.move(to: imagePointToDisplayPoint(line.start))
-                path.addLine(to: imagePointToDisplayPoint(line.end))
-                context.stroke(
-                    path,
-                    with: .color(line.color.swiftUIColor),
-                    style: StrokeStyle(
-                        lineWidth: displayStrokeWidth(for: line.lineWidth),
-                        lineCap: .round,
-                        lineJoin: .round
-                    )
-                )
-
-            case let .pen(pen):
-                var path = Path()
-                let displayPoints = pen.points.map(imagePointToDisplayPoint)
-                if let first = displayPoints.first {
-                    path.move(to: first)
-                    for point in displayPoints.dropFirst() {
-                        path.addLine(to: point)
-                    }
-                }
-                context.stroke(
-                    path,
-                    with: .color(pen.color.swiftUIColor),
-                    style: StrokeStyle(
-                        lineWidth: displayStrokeWidth(for: pen.lineWidth),
-                        lineCap: .round,
-                        lineJoin: .round
-                    )
-                )
-
             case let .text(text):
                 let fontSize = max(text.fontSize * layout.displayScale, 14)
-                let weight: Font.Weight = text.isBold ? .bold : .semibold
-
-                var textView = Text(text.text)
-                    .font(Font.system(size: fontSize, weight: weight))
-
-                if text.isItalic {
-                    textView = textView.italic()
-                }
-
-                if text.isUnderline {
-                    textView = textView.underline()
-                }
-
-                var resolvedText = context.resolve(textView)
+                var resolvedText = context.resolve(
+                    Text(text.text)
+                        .font(.system(size: fontSize, weight: .semibold))
+                )
                 resolvedText.shading = .color(text.color.swiftUIColor)
                 context.draw(resolvedText, at: imagePointToDisplayPoint(text.origin), anchor: .topLeading)
 
@@ -1366,7 +1059,7 @@ private struct ScreenshotEditorRootView: View {
     private func draftTextEditor(at origin: CGPoint) -> some View {
         TextField("输入文字", text: $draftText)
             .textFieldStyle(.plain)
-            .font(textFont)
+            .font(.system(size: max(textFontSize * layout.displayScale, 14), weight: .semibold))
             .foregroundStyle(viewModel.selectedColor.swiftUIColor)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -1392,25 +1085,6 @@ private struct ScreenshotEditorRootView: View {
                     commitTextDraftIfNeeded()
                 }
             }
-    }
-
-    private var textFont: Font {
-        let weight: Font.Weight = viewModel.textIsBold ? .bold : .semibold
-        let design: Font.Design = .default
-
-        if viewModel.textIsItalic {
-            return Font.system(
-                size: max(viewModel.textFontSize * layout.displayScale, 14),
-                weight: weight,
-                design: design
-            ).italic()
-        }
-
-        return Font.system(
-            size: max(viewModel.textFontSize * layout.displayScale, 14),
-            weight: weight,
-            design: design
-        )
     }
 
     private func switchTool(to tool: ScreenshotEditorTool) {
@@ -1440,10 +1114,7 @@ private struct ScreenshotEditorRootView: View {
                     origin: displayPointToImagePoint(draftTextOrigin),
                     text: trimmedText,
                     color: viewModel.selectedColor,
-                    fontSize: viewModel.textFontSize,
-                    isBold: viewModel.textIsBold,
-                    isItalic: viewModel.textIsItalic,
-                    isUnderline: viewModel.textIsUnderline
+                    fontSize: textFontSize
                 )
             )
         )
@@ -1518,17 +1189,14 @@ private struct ScreenshotEditorRootView: View {
 private struct ScreenshotEditorBackdropView: View {
     let screenSize: CGSize
     let imageRect: CGRect
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Canvas { context, size in
             var path = Path(CGRect(origin: .zero, size: size))
             path.addPath(Path(roundedRect: imageRect.insetBy(dx: -1, dy: -1), cornerRadius: 8))
-
-            let opacity = colorScheme == .dark ? 0.65 : 0.48
             context.fill(
                 path,
-                with: .color(Color.black.opacity(opacity)),
+                with: .color(Color.black.opacity(0.48)),
                 style: FillStyle(eoFill: true)
             )
         }
@@ -1763,18 +1431,6 @@ private enum ScreenshotEditorRenderer {
                 context.addPath(path)
                 context.strokePath()
 
-            case let .highlight(highlight):
-                let rect = appKitRect(fromTopLeftRect: highlight.rect, canvasSize: size)
-                let path = CGPath(
-                    roundedRect: rect,
-                    cornerWidth: 6,
-                    cornerHeight: 6,
-                    transform: nil
-                )
-                context.setFillColor(highlight.color.nsColor.withAlphaComponent(highlight.opacity).cgColor)
-                context.addPath(path)
-                context.fillPath()
-
             case let .arrow(arrow):
                 let start = appKitPoint(fromTopLeftPoint: arrow.start, canvasSize: size)
                 let end = appKitPoint(fromTopLeftPoint: arrow.end, canvasSize: size)
@@ -1802,62 +1458,15 @@ private enum ScreenshotEditorRenderer {
                 context.addLine(to: rightPoint)
                 context.strokePath()
 
-            case let .line(line):
-                let start = appKitPoint(fromTopLeftPoint: line.start, canvasSize: size)
-                let end = appKitPoint(fromTopLeftPoint: line.end, canvasSize: size)
-                context.setStrokeColor(line.color.nsColor.cgColor)
-                context.setLineWidth(line.lineWidth)
-                context.setLineCap(.round)
-                context.setLineJoin(.round)
-                context.beginPath()
-                context.move(to: start)
-                context.addLine(to: end)
-                context.strokePath()
-
-            case let .pen(pen):
-                context.setStrokeColor(pen.color.nsColor.cgColor)
-                context.setLineWidth(pen.lineWidth)
-                context.setLineCap(.round)
-                context.setLineJoin(.round)
-                context.beginPath()
-                if let first = pen.points.first {
-                    context.move(to: appKitPoint(fromTopLeftPoint: first, canvasSize: size))
-                    for point in pen.points.dropFirst() {
-                        context.addLine(to: appKitPoint(fromTopLeftPoint: point, canvasSize: size))
-                    }
-                }
-                context.strokePath()
-
             case let .text(text):
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.lineBreakMode = .byWordWrapping
 
-                var fontTraits: NSFontDescriptor.SymbolicTraits = []
-                if text.isBold {
-                    fontTraits.insert(.bold)
-                }
-                if text.isItalic {
-                    fontTraits.insert(.italic)
-                }
-
-                let baseFont = NSFont.systemFont(ofSize: text.fontSize, weight: text.isBold ? .bold : .semibold)
-                var font = baseFont
-
-                if text.isItalic {
-                    let descriptor = baseFont.fontDescriptor.withSymbolicTraits(fontTraits)
-                    font = NSFont(descriptor: descriptor, size: text.fontSize) ?? baseFont
-                }
-
-                var attributes: [NSAttributedString.Key: Any] = [
-                    .font: font,
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: text.fontSize, weight: .semibold),
                     .foregroundColor: text.color.nsColor,
                     .paragraphStyle: paragraph,
                 ]
-
-                if text.isUnderline {
-                    attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-                    attributes[.underlineColor] = text.color.nsColor
-                }
 
                 let attributedText = NSAttributedString(string: text.text, attributes: attributes)
                 let textHeight = max(size.height - text.origin.y - 8, text.fontSize + 12)
@@ -2072,98 +1681,5 @@ private extension NSImage {
         }
 
         return bitmap.representation(using: .png, properties: [:])
-    }
-}
-
-// MARK: - Toast View
-
-private struct ToastView: View {
-    let message: String
-    @State private var isAnimating = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-
-            Text(message)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.white)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.black.opacity(0.78))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 4)
-        .scaleEffect(isAnimating ? 1 : 0.85)
-        .opacity(isAnimating ? 1 : 0)
-        .onAppear {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                isAnimating = true
-            }
-        }
-    }
-}
-
-// MARK: - Tool Shortcuts Overlay
-
-private struct ToolShortcutsOverlay: View {
-    @State private var isAnimating = false
-
-    var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                shortcutItem(key: "1", tool: "线框")
-                shortcutItem(key: "2", tool: "高亮")
-                shortcutItem(key: "3", tool: "文字")
-                shortcutItem(key: "4", tool: "箭头")
-            }
-            HStack(spacing: 12) {
-                shortcutItem(key: "5", tool: "直线")
-                shortcutItem(key: "6", tool: "画笔")
-                shortcutItem(key: "7", tool: "马赛克")
-            }
-        }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.black.opacity(0.72))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.3), radius: 20, x: 0, y: 8)
-        .scaleEffect(isAnimating ? 1 : 0.9)
-        .opacity(isAnimating ? 1 : 0)
-        .onAppear {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) {
-                isAnimating = true
-            }
-        }
-    }
-
-    private func shortcutItem(key: String, tool: String) -> some View {
-        HStack(spacing: 6) {
-            Text(key)
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .frame(width: 22, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.white.opacity(0.2))
-                )
-
-            Text(tool)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.9))
-        }
     }
 }

@@ -36,7 +36,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
 
-        let image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "SnapBoard")
+        let image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "SnapX")
         image?.isTemplate = true
 
         button.image = image
@@ -44,7 +44,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         button.target = self
         button.action = #selector(handleStatusItemClick(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        button.toolTip = "SnapBoard"
+        button.toolTip = "SnapX"
     }
 
     private func configurePopover() {

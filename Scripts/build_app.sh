@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-APP_NAME="SnapBoard"
+APP_NAME="SnapX"
 OUTPUT_DIR="$PROJECT_ROOT/Build"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
@@ -30,9 +30,13 @@ cp "$INFO_PLIST_TEMPLATE" "$CONTENTS_DIR/Info.plist"
 if [[ -f "$APP_ICON" ]]; then
   cp "$APP_ICON" "$RESOURCES_DIR/AppIcon.icns"
 fi
+CAPTURE_SOUND="$PROJECT_ROOT/Packaging/capture.wav"
+if [[ -f "$CAPTURE_SOUND" ]]; then
+  cp "$CAPTURE_SOUND" "$RESOURCES_DIR/capture.wav"
+fi
 chmod +x "$MACOS_DIR/$APP_NAME"
 
-SIGN_IDENTITY="SnapBoard Dev"
+SIGN_IDENTITY="SnapX Dev"
 if security find-identity -v -p codesigning | grep -q "$SIGN_IDENTITY"; then
   codesign --force --sign "$SIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
 else

@@ -81,6 +81,17 @@ private struct HighlightedCaptureTarget: Equatable {
     let captureRequest: ScreenshotCaptureRequest
 }
 
+private enum ResizeHandle {
+    case topLeft, top, topRight
+    case left, right
+    case bottomLeft, bottom, bottomRight
+}
+
+private enum AdjustAction {
+    case moving
+    case resizing(ResizeHandle)
+}
+
 private final class SelectionOverlayCanvasView: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -100,6 +111,13 @@ private final class SelectionOverlayCanvasView: NSView {
     private var isAreaSelectionActive = false
     private var highlightedTarget: HighlightedCaptureTarget?
     private var isPointerInsideScreen = false
+
+    private var confirmedRect: CGRect?
+    private var adjustAction: AdjustAction?
+    private var adjustDragOrigin: CGPoint?
+    private var adjustOriginalRect: CGRect?
+    private let handleSize: CGFloat = 8
+    private let handleHitTolerance: CGFloat = 6
 
     init(
         frame frameRect: CGRect,
@@ -155,8 +173,35 @@ private final class SelectionOverlayCanvasView: NSView {
         switch mode {
         case .framed:
             isPointerInsideScreen = true
+
+            if let rect = confirmedRect {
+                if event.clickCount == 2, rect.contains(point) {
+                    confirmSelection()
+                    return
+                }
+
+                if let handle = handleAtPoint(point, in: rect) {
+                    adjustAction = .resizing(handle)
+                    adjustDragOrigin = point
+                    adjustOriginalRect = rect
+                    return
+                }
+
+                if rect.contains(point) {
+                    adjustAction = .moving
+                    adjustDragOrigin = point
+                    adjustOriginalRect = rect
+                    NSCursor.closedHand.set()
+                    return
+                }
+
+                confirmedRect = nil
+                adjustAction = nil
+            }
+
             dragStartPoint = point
             dragCurrentPoint = point
+            isAreaSelectionActive = false
             updateHighlightedTarget(at: point)
 
         case .display:
@@ -167,12 +212,37 @@ private final class SelectionOverlayCanvasView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard mode == .framed, let dragStartPoint else { return }
+        guard mode == .framed else { return }
 
-        dragCurrentPoint = clampedPoint(for: event)
-        if let dragCurrentPoint,
-           !isAreaSelectionActive,
-           dragDistance(from: dragStartPoint, to: dragCurrentPoint) >= dragActivationDistance {
+        let point = clampedPoint(for: event)
+
+        if let action = adjustAction,
+           let origin = adjustDragOrigin,
+           let originalRect = adjustOriginalRect {
+            let dx = point.x - origin.x
+            let dy = point.y - origin.y
+
+            switch action {
+            case .moving:
+                var newRect = originalRect
+                newRect.origin.x += dx
+                newRect.origin.y += dy
+                newRect.origin.x = max(0, min(newRect.origin.x, bounds.width - newRect.width))
+                newRect.origin.y = max(0, min(newRect.origin.y, bounds.height - newRect.height))
+                confirmedRect = newRect.integral
+
+            case .resizing(let handle):
+                confirmedRect = resizedRect(originalRect, handle: handle, dx: dx, dy: dy)
+            }
+
+            needsDisplay = true
+            return
+        }
+
+        guard let dragStartPoint else { return }
+        dragCurrentPoint = point
+        if !isAreaSelectionActive,
+           dragDistance(from: dragStartPoint, to: point) >= dragActivationDistance {
             isAreaSelectionActive = true
         }
         needsDisplay = true
@@ -183,6 +253,15 @@ private final class SelectionOverlayCanvasView: NSView {
 
         switch mode {
         case .framed:
+            if let rect = confirmedRect {
+                updateAdjustCursor(at: point, in: rect)
+                if !isPointerInsideScreen {
+                    isPointerInsideScreen = true
+                    needsDisplay = true
+                }
+                return
+            }
+
             updateHighlightedTarget(at: point)
             if !isPointerInsideScreen {
                 isPointerInsideScreen = true
@@ -202,6 +281,17 @@ private final class SelectionOverlayCanvasView: NSView {
 
         switch mode {
         case .framed:
+            if adjustAction != nil {
+                adjustAction = nil
+                adjustDragOrigin = nil
+                adjustOriginalRect = nil
+                if let rect = confirmedRect {
+                    updateAdjustCursor(at: point, in: rect)
+                }
+                needsDisplay = true
+                return
+            }
+
             dragCurrentPoint = point
             let shouldTreatAsAreaSelection: Bool
             if let dragStartPoint {
@@ -230,12 +320,8 @@ private final class SelectionOverlayCanvasView: NSView {
                     return
                 }
 
-                guard let displaySelection = makeScreenSelection(with: rect) else {
-                    cancelHandler()
-                    return
-                }
-
-                captureHandler(.area(displaySelection))
+                confirmedRect = rect
+                highlightedTarget = nil
                 return
             }
 
@@ -260,8 +346,24 @@ private final class SelectionOverlayCanvasView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == UInt16(kVK_Escape) {
+            if confirmedRect != nil {
+                confirmedRect = nil
+                adjustAction = nil
+                adjustDragOrigin = nil
+                adjustOriginalRect = nil
+                NSCursor.crosshair.set()
+                needsDisplay = true
+                return
+            }
             cancelHandler()
             return
+        }
+
+        if event.keyCode == UInt16(kVK_Return) || event.keyCode == UInt16(kVK_ANSI_KeypadEnter) {
+            if confirmedRect != nil {
+                confirmSelection()
+                return
+            }
         }
 
         super.keyDown(with: event)
@@ -275,7 +377,11 @@ private final class SelectionOverlayCanvasView: NSView {
         switch mode {
         case .framed:
             isPointerInsideScreen = true
-            updateHighlightedTarget(at: clampedPoint(for: event))
+            if let rect = confirmedRect {
+                updateAdjustCursor(at: clampedPoint(for: event), in: rect)
+            } else {
+                updateHighlightedTarget(at: clampedPoint(for: event))
+            }
 
         case .display:
             isPointerInsideScreen = true
@@ -287,7 +393,10 @@ private final class SelectionOverlayCanvasView: NSView {
         switch mode {
         case .framed:
             isPointerInsideScreen = false
-            highlightedTarget = nil
+            if confirmedRect == nil {
+                highlightedTarget = nil
+            }
+            NSCursor.arrow.set()
             needsDisplay = true
 
         case .display:
@@ -316,6 +425,8 @@ private final class SelectionOverlayCanvasView: NSView {
         case .framed:
             if let areaSelectionRect {
                 overlayPath.appendRect(areaSelectionRect)
+            } else if let confirmedRect {
+                overlayPath.appendRect(confirmedRect)
             } else if let highlightedTargetRect {
                 overlayPath.appendRect(highlightedTargetRect)
             }
@@ -337,6 +448,13 @@ private final class SelectionOverlayCanvasView: NSView {
                 drawFloatingLabel(
                     "\(Int(areaSelectionRect.width)) × \(Int(areaSelectionRect.height))",
                     near: areaSelectionRect
+                )
+            } else if let confirmedRect {
+                drawHighlightOutline(for: confirmedRect)
+                drawResizeHandles(for: confirmedRect)
+                drawFloatingLabel(
+                    "\(Int(confirmedRect.width)) × \(Int(confirmedRect.height)) · Enter 确认",
+                    near: confirmedRect
                 )
             } else if let highlightedTargetRect, let highlightedTarget {
                 drawHighlightOutline(for: highlightedTargetRect)
@@ -489,6 +607,134 @@ private final class SelectionOverlayCanvasView: NSView {
 
     private func dragDistance(from start: CGPoint, to end: CGPoint) -> CGFloat {
         hypot(end.x - start.x, end.y - start.y)
+    }
+
+    private func confirmSelection() {
+        guard let rect = confirmedRect, rect.width >= 8, rect.height >= 8 else {
+            NSSound.beep()
+            return
+        }
+
+        guard let displaySelection = makeScreenSelection(with: rect) else {
+            cancelHandler()
+            return
+        }
+
+        confirmedRect = nil
+        adjustAction = nil
+        captureHandler(.area(displaySelection))
+    }
+
+    private func handleAtPoint(_ point: CGPoint, in rect: CGRect) -> ResizeHandle? {
+        let tolerance = handleHitTolerance + handleSize / 2
+        let corners: [(ResizeHandle, CGPoint)] = [
+            (.topLeft, CGPoint(x: rect.minX, y: rect.minY)),
+            (.topRight, CGPoint(x: rect.maxX, y: rect.minY)),
+            (.bottomLeft, CGPoint(x: rect.minX, y: rect.maxY)),
+            (.bottomRight, CGPoint(x: rect.maxX, y: rect.maxY)),
+        ]
+
+        for (handle, center) in corners {
+            if hypot(point.x - center.x, point.y - center.y) <= tolerance {
+                return handle
+            }
+        }
+
+        let edgeTolerance = handleHitTolerance
+        if abs(point.y - rect.minY) <= edgeTolerance, point.x >= rect.minX, point.x <= rect.maxX {
+            return .top
+        }
+        if abs(point.y - rect.maxY) <= edgeTolerance, point.x >= rect.minX, point.x <= rect.maxX {
+            return .bottom
+        }
+        if abs(point.x - rect.minX) <= edgeTolerance, point.y >= rect.minY, point.y <= rect.maxY {
+            return .left
+        }
+        if abs(point.x - rect.maxX) <= edgeTolerance, point.y >= rect.minY, point.y <= rect.maxY {
+            return .right
+        }
+
+        return nil
+    }
+
+    private func resizedRect(_ original: CGRect, handle: ResizeHandle, dx: CGFloat, dy: CGFloat) -> CGRect {
+        var minX = original.minX
+        var minY = original.minY
+        var maxX = original.maxX
+        var maxY = original.maxY
+        let minSize: CGFloat = 16
+
+        switch handle {
+        case .topLeft:     minX += dx; minY += dy
+        case .top:         minY += dy
+        case .topRight:    maxX += dx; minY += dy
+        case .left:        minX += dx
+        case .right:       maxX += dx
+        case .bottomLeft:  minX += dx; maxY += dy
+        case .bottom:      maxY += dy
+        case .bottomRight: maxX += dx; maxY += dy
+        }
+
+        if maxX - minX < minSize {
+            switch handle {
+            case .topLeft, .left, .bottomLeft: minX = maxX - minSize
+            default: maxX = minX + minSize
+            }
+        }
+        if maxY - minY < minSize {
+            switch handle {
+            case .topLeft, .top, .topRight: minY = maxY - minSize
+            default: maxY = minY + minSize
+            }
+        }
+
+        minX = max(0, minX)
+        minY = max(0, minY)
+        maxX = min(bounds.width, maxX)
+        maxY = min(bounds.height, maxY)
+
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY).integral
+    }
+
+    private func drawResizeHandles(for rect: CGRect) {
+        let hs = handleSize
+        let handlePoints: [CGPoint] = [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.midX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.minX, y: rect.midY),
+            CGPoint(x: rect.maxX, y: rect.midY),
+            CGPoint(x: rect.minX, y: rect.maxY),
+            CGPoint(x: rect.midX, y: rect.maxY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+        ]
+
+        for center in handlePoints {
+            let handleRect = CGRect(x: center.x - hs / 2, y: center.y - hs / 2, width: hs, height: hs)
+            NSColor.white.setFill()
+            let path = NSBezierPath(roundedRect: handleRect, xRadius: 2, yRadius: 2)
+            path.fill()
+            NSColor.black.withAlphaComponent(0.3).setStroke()
+            path.lineWidth = 0.5
+            path.stroke()
+        }
+    }
+
+    private func updateAdjustCursor(at point: CGPoint, in rect: CGRect) {
+        if let handle = handleAtPoint(point, in: rect) {
+            switch handle {
+            case .top, .bottom:
+                NSCursor.resizeUpDown.set()
+            case .left, .right:
+                NSCursor.resizeLeftRight.set()
+            case .topLeft, .bottomRight, .topRight, .bottomLeft:
+                NSCursor.crosshair.set()
+            }
+        } else if rect.contains(point) {
+            NSCursor.openHand.set()
+        } else {
+            NSCursor.crosshair.set()
+        }
     }
 
     private func captureTarget(at point: CGPoint) -> HighlightedCaptureTarget? {

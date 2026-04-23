@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct SnapBoardApp: App {
+struct SnapXApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {

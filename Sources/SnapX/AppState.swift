@@ -134,8 +134,8 @@ final class AppState: ObservableObject {
 
     private func presentRestartPrompt() {
         let alert = NSAlert()
-        alert.messageText = "需要重启 SnapBoard"
-        alert.informativeText = "屏幕录制权限已授予，请退出并重新打开 SnapBoard 使权限生效。"
+        alert.messageText = "需要重启 SnapX"
+        alert.informativeText = "屏幕录制权限已授予，请退出并重新打开 SnapX 使权限生效。"
         alert.addButton(withTitle: "退出")
         alert.addButton(withTitle: "稍后")
         if alert.runModal() == .alertFirstButtonReturn {
@@ -238,7 +238,7 @@ final class AppState: ObservableObject {
         } catch {
             NSSound.beep()
             let alert = NSAlert()
-            alert.messageText = "无法重启 SnapBoard"
+            alert.messageText = "无法重启 SnapX"
             alert.informativeText = error.localizedDescription
             alert.addButton(withTitle: "好的")
             alert.runModal()
