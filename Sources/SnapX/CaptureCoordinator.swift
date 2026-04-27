@@ -239,10 +239,8 @@ final class CaptureCoordinator {
 
         let image: NSImage?
         if frozenScreenImages.isEmpty {
-            // Live-select mode: capture now
             image = ScreenshotCapturer.capture(request: request)
         } else {
-            // Freeze-first mode: crop from pre-captured image
             image = ScreenshotCapturer.cropFromFrozen(request: request, frozenImages: frozenScreenImages)
         }
 
@@ -252,25 +250,53 @@ final class CaptureCoordinator {
             return
         }
 
-        if transitionSelectionOverlayToEditor(with: image, request: request) {
+        // For area captures, provide the full screen image so the editor can re-crop on handle drag
+        var fullScreenImage: NSImage?
+        if case let .area(selection) = request {
+            if let frozenCG = frozenScreenImages[selection.displayID] {
+                let screen = NSScreen.screens.first { s in
+                    (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == selection.displayID
+                }
+                let screenSize = screen?.frame.size ?? CGSize(width: frozenCG.width, height: frozenCG.height)
+                fullScreenImage = NSImage(cgImage: frozenCG, size: screenSize)
+            } else if let displayCG = CGDisplayCreateImage(selection.displayID) {
+                let screen = NSScreen.screens.first { s in
+                    (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == selection.displayID
+                }
+                let screenSize = screen?.frame.size ?? CGSize(width: displayCG.width, height: displayCG.height)
+                fullScreenImage = NSImage(cgImage: displayCG, size: screenSize)
+            }
+        }
+
+        if transitionSelectionOverlayToEditor(with: image, request: request, fullScreenImage: fullScreenImage) {
             return
         }
 
         cancelSelectionMode()
-        presentCapturedImage(image, request: request)
+        presentCapturedImage(image, request: request, fullScreenImage: fullScreenImage)
     }
 
-    private func presentCapturedImage(_ image: NSImage, request: ScreenshotCaptureRequest) {
+    private func presentCapturedImage(_ image: NSImage, request: ScreenshotCaptureRequest, fullScreenImage: NSImage? = nil) {
         let sourceRect = editorSourceRect(for: request)
-        presentCapturedImage(image, sourceRect: sourceRect)
+        var cropInfo: ScreenshotEditorCropInfo?
+        if let fullScreenImage, case let .area(selection) = request {
+            cropInfo = ScreenshotEditorCropInfo(
+                fullScreenImage: fullScreenImage,
+                selectionRect: selection.rect,
+                displayID: selection.displayID,
+                scaleFactor: selection.scaleFactor
+            )
+        }
+        presentCapturedImage(image, sourceRect: sourceRect, cropInfo: cropInfo)
     }
 
-    private func presentCapturedImage(_ image: NSImage, sourceRect: CGRect?, existingWindow: NSWindow? = nil) {
+    private func presentCapturedImage(_ image: NSImage, sourceRect: CGRect?, cropInfo: ScreenshotEditorCropInfo? = nil, existingWindow: NSWindow? = nil) {
         screenshotEditorWindowController?.close()
 
         let controller = ScreenshotEditorWindowController(
             image: image,
             sourceRect: sourceRect,
+            cropInfo: cropInfo,
             existingWindow: existingWindow,
             onPin: { [weak self] editedImage in
                 self?.presentPinnedWindow(for: editedImage)
@@ -290,11 +316,21 @@ final class CaptureCoordinator {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func transitionSelectionOverlayToEditor(with image: NSImage, request: ScreenshotCaptureRequest) -> Bool {
+    private func transitionSelectionOverlayToEditor(with image: NSImage, request: ScreenshotCaptureRequest, fullScreenImage: NSImage? = nil) -> Bool {
         guard let sourceRect = editorSourceRect(for: request),
               let targetIndex = overlayWindowControllers.firstIndex(where: { $0.contains(globalRect: sourceRect) }),
               let transitionWindow = overlayWindowControllers[targetIndex].takeWindowForTransition() else {
             return false
+        }
+
+        var cropInfo: ScreenshotEditorCropInfo?
+        if let fullScreenImage, case let .area(selection) = request {
+            cropInfo = ScreenshotEditorCropInfo(
+                fullScreenImage: fullScreenImage,
+                selectionRect: selection.rect,
+                displayID: selection.displayID,
+                scaleFactor: selection.scaleFactor
+            )
         }
 
         let controllersToClose = overlayWindowControllers.enumerated().compactMap { index, controller in
@@ -306,7 +342,7 @@ final class CaptureCoordinator {
         controllersToClose.forEach { $0.close() }
 
         popCrosshairCursor()
-        presentCapturedImage(image, sourceRect: sourceRect, existingWindow: transitionWindow)
+        presentCapturedImage(image, sourceRect: sourceRect, cropInfo: cropInfo, existingWindow: transitionWindow)
         return true
     }
 

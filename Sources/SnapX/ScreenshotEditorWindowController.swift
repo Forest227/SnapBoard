@@ -5,6 +5,13 @@ import Carbon.HIToolbox
 import SwiftUI
 import Vision
 
+struct ScreenshotEditorCropInfo {
+    let fullScreenImage: NSImage
+    let selectionRect: CGRect
+    let displayID: CGDirectDisplayID
+    let scaleFactor: CGFloat
+}
+
 @MainActor
 final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelegate {
     private let viewModel: ScreenshotEditorViewModel
@@ -17,12 +24,13 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
     init(
         image: NSImage,
         sourceRect: CGRect?,
+        cropInfo: ScreenshotEditorCropInfo? = nil,
         existingWindow: NSWindow? = nil,
         onPin: @escaping (NSImage) -> Void,
         onCopy: @escaping (NSImage) -> Void,
         onClose: @escaping () -> Void
     ) {
-        viewModel = ScreenshotEditorViewModel(image: image)
+        viewModel = ScreenshotEditorViewModel(image: image, cropInfo: cropInfo)
         self.onPin = onPin
         self.onCopy = onCopy
         self.onClose = onClose
@@ -366,8 +374,10 @@ private struct ScreenshotEditorLayout {
 
 @MainActor
 private final class ScreenshotEditorViewModel: ObservableObject {
-    let image: NSImage
-    let pixelatedPreviewImage: NSImage?
+    @Published var image: NSImage
+    @Published var pixelatedPreviewImage: NSImage?
+
+    let cropInfo: ScreenshotEditorCropInfo?
 
     @Published var activeTool: ScreenshotEditorTool = .rectangle
     @Published var selectedColor: ScreenshotAnnotationColor = .red
@@ -382,13 +392,18 @@ private final class ScreenshotEditorViewModel: ObservableObject {
 
     private var toastDismissWorkItem: DispatchWorkItem?
 
-    init(image: NSImage) {
+    init(image: NSImage, cropInfo: ScreenshotEditorCropInfo? = nil) {
         self.image = image
+        self.cropInfo = cropInfo
         pixelatedPreviewImage = ScreenshotEditorRenderer.makePixelatedPreviewImage(for: image)
     }
 
     var canUndo: Bool {
         !annotations.isEmpty
+    }
+
+    var canAdjustCrop: Bool {
+        cropInfo != nil
     }
 
     func addAnnotation(_ annotation: ScreenshotEditorAnnotation) {
@@ -402,6 +417,25 @@ private final class ScreenshotEditorViewModel: ObservableObject {
 
     func renderedImage() -> NSImage {
         ScreenshotEditorRenderer.render(image: image, annotations: annotations)
+    }
+
+    func recrop(newRect: CGRect) {
+        guard let cropInfo else { return }
+        let sf = cropInfo.scaleFactor
+        let pixelRect = CGRect(
+            x: newRect.minX * sf,
+            y: newRect.minY * sf,
+            width: newRect.width * sf,
+            height: newRect.height * sf
+        ).integral
+
+        guard let fullCG = cropInfo.fullScreenImage.cgImageRepresentation,
+              let croppedCG = fullCG.cropping(to: pixelRect) else { return }
+
+        let newImage = NSImage(cgImage: croppedCG, size: newRect.size)
+        image = newImage
+        pixelatedPreviewImage = ScreenshotEditorRenderer.makePixelatedPreviewImage(for: newImage)
+        annotations.removeAll()
     }
 
     func showToast(_ message: String) {
@@ -634,6 +668,13 @@ private struct DraftLine {
     let end: CGPoint
 }
 
+private enum CropEdge {
+    case topLeft, top, topRight
+    case left, right
+    case bottomLeft, bottom, bottomRight
+    case move
+}
+
 private struct ScreenshotEditorRootView: View {
     private static let selectionFrameColor = Color(red: 0.2, green: 0.86, blue: 0.56)
 
@@ -656,23 +697,58 @@ private struct ScreenshotEditorRootView: View {
     @FocusState private var isTextFieldFocused: Bool
     @State private var showToolShortcuts: Bool = false
 
+    @State private var cropAdjustRect: CGRect?
+    @State private var isCropDragging = false
+    @State private var cropDragEdge: CropEdge?
+    @State private var cropDragStart: CGPoint?
+    @State private var cropOriginalRect: CGRect?
+
     private let rectangleLineWidth: CGFloat = 4
     private let arrowLineWidth: CGFloat = 4
     private let lineLineWidth: CGFloat = 4
     private let penLineWidth: CGFloat = 4
     private let mosaicBrushSize: CGFloat = 28
     private let highlightOpacity: CGFloat = 0.35
+    private let cropHandleSize: CGFloat = 8
+    private let cropHandleHitTolerance: CGFloat = 10
+
+    private var currentDisplayScale: CGFloat {
+        max(layout.imageRect.width / max(viewModel.image.size.width, 1), 0.01)
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             ScreenshotEditorBackdropView(
                 screenSize: layout.screenSize,
-                imageRect: layout.imageRect
+                imageRect: isCropDragging ? (cropAdjustRect ?? layout.imageRect) : layout.imageRect
             )
 
             imageStage
                 .frame(width: layout.imageRect.width, height: layout.imageRect.height)
                 .offset(x: layout.imageRect.minX, y: layout.imageRect.minY)
+                .opacity(isCropDragging ? 0.3 : 1)
+
+            if isCropDragging, let adjustRect = cropAdjustRect, let fullImg = viewModel.cropInfo?.fullScreenImage {
+                Image(nsImage: fullImg)
+                    .resizable()
+                    .frame(width: layout.screenSize.width, height: layout.screenSize.height)
+                    .mask(
+                        Rectangle()
+                            .frame(width: adjustRect.width, height: adjustRect.height)
+                            .offset(x: adjustRect.midX - layout.screenSize.width / 2,
+                                    y: adjustRect.midY - layout.screenSize.height / 2)
+                    )
+
+                SelectionFrameChromeView(
+                    size: adjustRect.size,
+                    borderColor: Self.selectionFrameColor
+                )
+                .offset(x: adjustRect.minX, y: adjustRect.minY)
+            }
+
+            if viewModel.canAdjustCrop {
+                cropHandleOverlay
+            }
 
             toolbar
                 .fixedSize()
@@ -741,7 +817,7 @@ private struct ScreenshotEditorRootView: View {
                 draftTextEditor(at: draftTextOrigin)
             }
         }
-        .overlay(selectionChrome)
+        .overlay(isCropDragging ? nil : selectionChrome)
         .contentShape(Rectangle())
         .gesture(dragGesture)
         .simultaneousGesture(tapGesture)
@@ -1316,7 +1392,7 @@ private struct ScreenshotEditorRootView: View {
                 )
 
             case let .text(text):
-                let fontSize = max(text.fontSize * layout.displayScale, 14)
+                let fontSize = max(text.fontSize * currentDisplayScale, 14)
                 let weight: Font.Weight = text.isBold ? .bold : .semibold
 
                 var textView = Text(text.text)
@@ -1400,14 +1476,14 @@ private struct ScreenshotEditorRootView: View {
 
         if viewModel.textIsItalic {
             return Font.system(
-                size: max(viewModel.textFontSize * layout.displayScale, 14),
+                size: max(viewModel.textFontSize * currentDisplayScale, 14),
                 weight: weight,
                 design: design
             ).italic()
         }
 
         return Font.system(
-            size: max(viewModel.textFontSize * layout.displayScale, 14),
+            size: max(viewModel.textFontSize * currentDisplayScale, 14),
             weight: weight,
             design: design
         )
@@ -1455,6 +1531,143 @@ private struct ScreenshotEditorRootView: View {
         isTextFieldFocused = false
     }
 
+    // MARK: - Crop Adjustment
+
+    private var cropHandleOverlay: some View {
+        CropHandleHitView(
+            rect: isCropDragging ? (cropAdjustRect ?? layout.imageRect) : layout.imageRect,
+            tolerance: cropHandleHitTolerance
+        )
+        .gesture(cropDragGesture)
+        .frame(width: layout.screenSize.width, height: layout.screenSize.height)
+        .allowsHitTesting(viewModel.canAdjustCrop)
+    }
+
+    private var cropDragGesture: some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .local)
+            .onChanged { value in
+                let point = value.startLocation
+                if cropDragEdge == nil {
+                    let targetRect = isCropDragging ? (cropAdjustRect ?? layout.imageRect) : layout.imageRect
+                    cropDragEdge = cropEdge(at: point, in: targetRect)
+                    cropDragStart = point
+                    cropOriginalRect = targetRect
+                    isCropDragging = true
+                }
+
+                guard let edge = cropDragEdge,
+                      let originalRect = cropOriginalRect else { return }
+
+                let dx = value.location.x - (cropDragStart?.x ?? value.location.x)
+                let dy = value.location.y - (cropDragStart?.y ?? value.location.y)
+
+                cropAdjustRect = adjustedCropRect(originalRect, edge: edge, dx: dx, dy: dy)
+            }
+            .onEnded { _ in
+                if let finalRect = cropAdjustRect {
+                    applyCropAdjustment(finalRect)
+                }
+                cropDragEdge = nil
+                cropDragStart = nil
+                cropOriginalRect = nil
+                isCropDragging = false
+                cropAdjustRect = nil
+            }
+    }
+
+    private func cropEdge(at point: CGPoint, in rect: CGRect) -> CropEdge? {
+        let ht = cropHandleHitTolerance + cropHandleSize / 2
+        let corners: [(CropEdge, CGPoint)] = [
+            (.topLeft, CGPoint(x: rect.minX, y: rect.minY)),
+            (.topRight, CGPoint(x: rect.maxX, y: rect.minY)),
+            (.bottomLeft, CGPoint(x: rect.minX, y: rect.maxY)),
+            (.bottomRight, CGPoint(x: rect.maxX, y: rect.maxY)),
+        ]
+        for (edge, center) in corners {
+            if hypot(point.x - center.x, point.y - center.y) <= ht { return edge }
+        }
+
+        let midpoints: [(CropEdge, CGPoint)] = [
+            (.top, CGPoint(x: rect.midX, y: rect.minY)),
+            (.bottom, CGPoint(x: rect.midX, y: rect.maxY)),
+            (.left, CGPoint(x: rect.minX, y: rect.midY)),
+            (.right, CGPoint(x: rect.maxX, y: rect.midY)),
+        ]
+        for (edge, center) in midpoints {
+            if hypot(point.x - center.x, point.y - center.y) <= ht { return edge }
+        }
+
+        let et = cropHandleHitTolerance
+        if abs(point.y - rect.minY) <= et, point.x >= rect.minX, point.x <= rect.maxX { return .top }
+        if abs(point.y - rect.maxY) <= et, point.x >= rect.minX, point.x <= rect.maxX { return .bottom }
+        if abs(point.x - rect.minX) <= et, point.y >= rect.minY, point.y <= rect.maxY { return .left }
+        if abs(point.x - rect.maxX) <= et, point.y >= rect.minY, point.y <= rect.maxY { return .right }
+
+        return .move
+    }
+
+    private func adjustedCropRect(_ original: CGRect, edge: CropEdge, dx: CGFloat, dy: CGFloat) -> CGRect {
+        var minX = original.minX
+        var minY = original.minY
+        var maxX = original.maxX
+        var maxY = original.maxY
+        let minSize: CGFloat = 40
+        let screenW = layout.screenSize.width
+        let screenH = layout.screenSize.height
+
+        switch edge {
+        case .topLeft:     minX += dx; minY += dy
+        case .top:         minY += dy
+        case .topRight:    maxX += dx; minY += dy
+        case .left:        minX += dx
+        case .right:       maxX += dx
+        case .bottomLeft:  minX += dx; maxY += dy
+        case .bottom:      maxY += dy
+        case .bottomRight: maxX += dx; maxY += dy
+        case .move:
+            var newOriginX = original.minX + dx
+            var newOriginY = original.minY + dy
+            newOriginX = max(0, min(newOriginX, screenW - original.width))
+            newOriginY = max(0, min(newOriginY, screenH - original.height))
+            return CGRect(x: newOriginX, y: newOriginY, width: original.width, height: original.height).integral
+        }
+
+        if maxX - minX < minSize {
+            switch edge {
+            case .topLeft, .left, .bottomLeft: minX = maxX - minSize
+            default: maxX = minX + minSize
+            }
+        }
+        if maxY - minY < minSize {
+            switch edge {
+            case .topLeft, .top, .topRight: minY = maxY - minSize
+            default: maxY = minY + minSize
+            }
+        }
+
+        minX = max(0, minX)
+        minY = max(0, minY)
+        maxX = min(screenW, maxX)
+        maxY = min(screenH, maxY)
+
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY).integral
+    }
+
+    private func applyCropAdjustment(_ screenRect: CGRect) {
+        guard viewModel.cropInfo != nil else { return }
+
+        let newSelectionRect = CGRect(
+            x: screenRect.minX,
+            y: screenRect.minY,
+            width: screenRect.width,
+            height: screenRect.height
+        )
+
+        guard newSelectionRect.width >= 8, newSelectionRect.height >= 8 else { return }
+
+        viewModel.recrop(newRect: newSelectionRect)
+    }
+
     private func clampedDisplayPoint(for point: CGPoint) -> CGPoint {
         CGPoint(
             x: min(max(point.x, 0), layout.imageRect.width),
@@ -1471,38 +1684,38 @@ private struct ScreenshotEditorRootView: View {
 
     private func imagePointToDisplayPoint(_ point: CGPoint) -> CGPoint {
         CGPoint(
-            x: point.x * layout.displayScale,
-            y: point.y * layout.displayScale
+            x: point.x * currentDisplayScale,
+            y: point.y * currentDisplayScale
         )
     }
 
     private func displayPointToImagePoint(_ point: CGPoint) -> CGPoint {
         CGPoint(
-            x: point.x / layout.displayScale,
-            y: point.y / layout.displayScale
+            x: point.x / currentDisplayScale,
+            y: point.y / currentDisplayScale
         )
     }
 
     private func imageRectToDisplayRect(_ rect: CGRect) -> CGRect {
         CGRect(
-            x: rect.origin.x * layout.displayScale,
-            y: rect.origin.y * layout.displayScale,
-            width: rect.width * layout.displayScale,
-            height: rect.height * layout.displayScale
+            x: rect.origin.x * currentDisplayScale,
+            y: rect.origin.y * currentDisplayScale,
+            width: rect.width * currentDisplayScale,
+            height: rect.height * currentDisplayScale
         )
     }
 
     private func displayRectToImageRect(_ rect: CGRect) -> CGRect {
         CGRect(
-            x: rect.origin.x / layout.displayScale,
-            y: rect.origin.y / layout.displayScale,
-            width: rect.width / layout.displayScale,
-            height: rect.height / layout.displayScale
+            x: rect.origin.x / currentDisplayScale,
+            y: rect.origin.y / currentDisplayScale,
+            width: rect.width / currentDisplayScale,
+            height: rect.height / currentDisplayScale
         )
     }
 
     private func displayStrokeWidth(for imageStrokeWidth: CGFloat) -> CGFloat {
-        max(imageStrokeWidth * layout.displayScale, 2)
+        max(imageStrokeWidth * currentDisplayScale, 2)
     }
 
     private var hasVisibleMosaicContent: Bool {
@@ -1571,6 +1784,26 @@ private struct SelectionFrameChromeView: View {
             CGPoint(x: width / 2, y: height),
             CGPoint(x: width, y: height),
         ]
+    }
+}
+
+private struct CropHandleHitView: View {
+    let rect: CGRect
+    let tolerance: CGFloat
+
+    var body: some View {
+        Canvas { _, _ in }
+            .contentShape(hitShape, eoFill: true)
+    }
+
+    private var hitShape: Path {
+        var path = Path()
+        path.addRect(rect.insetBy(dx: -tolerance, dy: -tolerance))
+        let inner = rect.insetBy(dx: tolerance, dy: tolerance)
+        if inner.width > 0, inner.height > 0 {
+            path.addRect(inner)
+        }
+        return path
     }
 }
 

@@ -43,4 +43,8 @@ else
 fi
 codesign --verify --deep --strict "$APP_BUNDLE"
 
+# Reset screen capture TCC entry so macOS re-prompts on first launch
+# (avoids stale CDHash causing silent permission denial)
+tccutil reset ScreenCapture com.wuqicheng.snapboard 2>/dev/null || true
+
 echo "$APP_BUNDLE"
