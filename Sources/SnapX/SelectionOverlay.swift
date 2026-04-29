@@ -46,7 +46,6 @@ final class SelectionOverlayWindowController: NSWindowController {
         window.contentView = contentView
 
         if frozenImage != nil {
-            window.isOpaque = true
             contentView.display()
         }
 
@@ -100,7 +99,10 @@ private final class SelectionOverlayCanvasView: NSView {
     private var isAreaSelectionActive = false
     private var highlightedTarget: HighlightedCaptureTarget?
     private var isPointerInsideScreen = false
-
+    private var cachedWindowInfoList: [[String: Any]]?
+    private var windowInfoCacheTime: CFTimeInterval = 0
+    private let windowInfoCacheInterval: CFTimeInterval = 0.2
+    private let desktopTopEdge: CGFloat
     init(
         frame frameRect: CGRect,
         screen: NSScreen,
@@ -117,8 +119,10 @@ private final class SelectionOverlayCanvasView: NSView {
         dockDisplayName = Self.resolveDockDisplayName()
         self.captureHandler = captureHandler
         self.cancelHandler = cancelHandler
+        desktopTopEdge = NSScreen.screens.map(\.frame.maxY).max() ?? screen.frame.maxY
         super.init(frame: frameRect)
         wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
     }
 
     @available(*, unavailable)
@@ -296,10 +300,10 @@ private final class SelectionOverlayCanvasView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // In freeze-first mode, draw the frozen screenshot as background
-        if let frozenImage, let context = NSGraphicsContext.current?.cgContext {
+        if let frozenImage {
+            guard let context = NSGraphicsContext.current?.cgContext else { return }
             context.saveGState()
-            // NSView is flipped, so we need to flip the drawing
+            // frozenImage uses top-left origin; flip to match flipped NSView
             context.translateBy(x: 0, y: bounds.height)
             context.scaleBy(x: 1, y: -1)
             context.draw(frozenImage, in: CGRect(origin: .zero, size: bounds.size))
@@ -504,9 +508,14 @@ private final class SelectionOverlayCanvasView: NSView {
             return systemSurfaceTarget
         }
 
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        let now = CACurrentMediaTime()
+        if cachedWindowInfoList == nil || (now - windowInfoCacheTime) >= windowInfoCacheInterval {
+            let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+            cachedWindowInfoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
+            windowInfoCacheTime = now
+        }
 
-        guard let windowInfoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+        guard let windowInfoList = cachedWindowInfoList else {
             return nil
         }
 
@@ -649,7 +658,6 @@ private final class SelectionOverlayCanvasView: NSView {
     }
 
     private func localRect(fromGlobalScreenRect rect: CGRect) -> CGRect {
-        let desktopTopEdge = NSScreen.screens.map(\.frame.maxY).max() ?? screen.frame.maxY
         let cocoaRect = CGRect(
             x: rect.minX,
             y: desktopTopEdge - rect.maxY,

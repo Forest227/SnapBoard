@@ -156,8 +156,9 @@ final class CaptureCoordinator {
 
         // In freeze-first mode, capture all screens before showing overlay
         frozenScreenImages = [:]
+        let screens = NSScreen.screens
         if captureTimingMode == .freezeFirst {
-            for screen in NSScreen.screens {
+            for screen in screens {
                 guard let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
                       let cgImage = CGDisplayCreateImage(displayID) else {
                     continue
@@ -168,7 +169,7 @@ final class CaptureCoordinator {
 
         pushCrosshairCursor()
 
-        overlayWindowControllers = NSScreen.screens.compactMap { screen in
+        overlayWindowControllers = screens.compactMap { screen in
             let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
             let frozenImage = frozenScreenImages[displayID]
 
@@ -232,9 +233,12 @@ final class CaptureCoordinator {
     }
 
     private func finishCapture(with request: ScreenshotCaptureRequest) {
-        // For display capture, overlay covers the whole screen so must hide first
-        if case .display = request {
+        // In live-select mode, hide overlay before capturing so the
+        // semi-transparent overlay tint doesn't appear in the screenshot
+        if frozenScreenImages.isEmpty {
             overlayWindowControllers.forEach { $0.window?.orderOut(nil) }
+            CATransaction.flush()
+            captureSound?.play()
         }
 
         let image: NSImage?
@@ -250,43 +254,80 @@ final class CaptureCoordinator {
             return
         }
 
-        // For area captures, provide the full screen image so the editor can re-crop on handle drag
+        // For area and window captures, provide the full screen image so the editor can re-crop on handle drag
         var fullScreenImage: NSImage?
-        if case let .area(selection) = request {
-            if let frozenCG = frozenScreenImages[selection.displayID] {
-                let screen = NSScreen.screens.first { s in
-                    (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == selection.displayID
-                }
-                let screenSize = screen?.frame.size ?? CGSize(width: frozenCG.width, height: frozenCG.height)
-                fullScreenImage = NSImage(cgImage: frozenCG, size: screenSize)
-            } else if let displayCG = CGDisplayCreateImage(selection.displayID) {
-                let screen = NSScreen.screens.first { s in
-                    (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == selection.displayID
-                }
-                let screenSize = screen?.frame.size ?? CGSize(width: displayCG.width, height: displayCG.height)
-                fullScreenImage = NSImage(cgImage: displayCG, size: screenSize)
+        var cropInfo: ScreenshotEditorCropInfo?
+
+        switch request {
+        case let .area(selection):
+            let result = resolveFullScreenImage(displayID: selection.displayID)
+            fullScreenImage = result.image
+            if let fullScreenImage {
+                cropInfo = ScreenshotEditorCropInfo(
+                    fullScreenImage: fullScreenImage,
+                    selectionRect: selection.rect,
+                    displayID: selection.displayID,
+                    scaleFactor: selection.scaleFactor
+                )
             }
+
+        case let .window(selection):
+            let windowBounds = selection.bounds
+            let screens = NSScreen.screens
+            let desktopTopEdge = screens.map(\.frame.maxY).max() ?? 0
+            for screen in screens {
+                guard let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value else {
+                    continue
+                }
+                let screenFrame = screen.frame
+                let windowCocoaY = desktopTopEdge - windowBounds.maxY
+                let localX = windowBounds.minX - screenFrame.minX
+                let localY = screenFrame.maxY - windowCocoaY - windowBounds.height
+                let localRect = CGRect(x: localX, y: localY, width: windowBounds.width, height: windowBounds.height)
+                let screenLocalBounds = CGRect(origin: .zero, size: screenFrame.size)
+                guard screenLocalBounds.intersects(localRect) else { continue }
+
+                let result = resolveFullScreenImage(displayID: displayID)
+                fullScreenImage = result.image
+                if let fullScreenImage {
+                    cropInfo = ScreenshotEditorCropInfo(
+                        fullScreenImage: fullScreenImage,
+                        selectionRect: localRect,
+                        displayID: displayID,
+                        scaleFactor: screen.backingScaleFactor
+                    )
+                }
+                break
+            }
+
+        case .display:
+            break
         }
 
-        if transitionSelectionOverlayToEditor(with: image, request: request, fullScreenImage: fullScreenImage) {
+        if transitionSelectionOverlayToEditor(with: image, request: request, fullScreenImage: fullScreenImage, cropInfo: cropInfo) {
             return
         }
 
         cancelSelectionMode()
-        presentCapturedImage(image, request: request, fullScreenImage: fullScreenImage)
+        presentCapturedImage(image, request: request, cropInfo: cropInfo)
     }
 
-    private func presentCapturedImage(_ image: NSImage, request: ScreenshotCaptureRequest, fullScreenImage: NSImage? = nil) {
-        let sourceRect = editorSourceRect(for: request)
-        var cropInfo: ScreenshotEditorCropInfo?
-        if let fullScreenImage, case let .area(selection) = request {
-            cropInfo = ScreenshotEditorCropInfo(
-                fullScreenImage: fullScreenImage,
-                selectionRect: selection.rect,
-                displayID: selection.displayID,
-                scaleFactor: selection.scaleFactor
-            )
+    private func resolveFullScreenImage(displayID: CGDirectDisplayID) -> (image: NSImage?, displayID: CGDirectDisplayID) {
+        let matchingScreen = NSScreen.screens.first { s in
+            (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
         }
+        if let frozenCG = frozenScreenImages[displayID] {
+            let screenSize = matchingScreen?.frame.size ?? CGSize(width: frozenCG.width, height: frozenCG.height)
+            return (NSImage(cgImage: frozenCG, size: screenSize), displayID)
+        } else if let displayCG = CGDisplayCreateImage(displayID) {
+            let screenSize = matchingScreen?.frame.size ?? CGSize(width: displayCG.width, height: displayCG.height)
+            return (NSImage(cgImage: displayCG, size: screenSize), displayID)
+        }
+        return (nil, displayID)
+    }
+
+    private func presentCapturedImage(_ image: NSImage, request: ScreenshotCaptureRequest, cropInfo: ScreenshotEditorCropInfo? = nil) {
+        let sourceRect = editorSourceRect(for: request)
         presentCapturedImage(image, sourceRect: sourceRect, cropInfo: cropInfo)
     }
 
@@ -316,21 +357,11 @@ final class CaptureCoordinator {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func transitionSelectionOverlayToEditor(with image: NSImage, request: ScreenshotCaptureRequest, fullScreenImage: NSImage? = nil) -> Bool {
+    private func transitionSelectionOverlayToEditor(with image: NSImage, request: ScreenshotCaptureRequest, fullScreenImage: NSImage? = nil, cropInfo: ScreenshotEditorCropInfo? = nil) -> Bool {
         guard let sourceRect = editorSourceRect(for: request),
               let targetIndex = overlayWindowControllers.firstIndex(where: { $0.contains(globalRect: sourceRect) }),
               let transitionWindow = overlayWindowControllers[targetIndex].takeWindowForTransition() else {
             return false
-        }
-
-        var cropInfo: ScreenshotEditorCropInfo?
-        if let fullScreenImage, case let .area(selection) = request {
-            cropInfo = ScreenshotEditorCropInfo(
-                fullScreenImage: fullScreenImage,
-                selectionRect: selection.rect,
-                displayID: selection.displayID,
-                scaleFactor: selection.scaleFactor
-            )
         }
 
         let controllersToClose = overlayWindowControllers.enumerated().compactMap { index, controller in

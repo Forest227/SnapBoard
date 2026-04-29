@@ -28,6 +28,10 @@ final class ScreenshotHistory: ObservableObject {
         items.removeAll { $0.id == item.id }
     }
 
+    func removeAll(where predicate: (HistoryItem) -> Bool) {
+        items.removeAll(where: predicate)
+    }
+
     func clear() {
         items.removeAll()
     }

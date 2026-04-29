@@ -69,7 +69,6 @@ final class ThemeManager: ObservableObject {
         for window in NSApp.windows {
             window.appearance = appearance
             window.contentView?.appearance = appearance
-            window.contentView?.needsDisplay = true
         }
     }
 
@@ -83,6 +82,5 @@ final class ThemeManager: ObservableObject {
             window.appearance = nil
             window.contentView?.appearance = nil
         }
-        window.contentView?.needsDisplay = true
     }
 }

@@ -7,3 +7,6 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+package-lock.json
+__pycache__/
+*.pyc

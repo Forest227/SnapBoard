@@ -109,6 +109,9 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
             }
 
             if event.keyCode == UInt16(kVK_Return) {
+                if self.viewModel.hasActiveTextDraft {
+                    return event
+                }
                 self.completeEditing()
                 return nil
             }
@@ -389,13 +392,20 @@ private final class ScreenshotEditorViewModel: ObservableObject {
     @Published var annotations: [ScreenshotEditorAnnotation] = []
     @Published var isExtractingText = false
     @Published var toastMessage: String?
+    @Published var hasActiveTextDraft = false
 
     private var toastDismissWorkItem: DispatchWorkItem?
 
     init(image: NSImage, cropInfo: ScreenshotEditorCropInfo? = nil) {
         self.image = image
         self.cropInfo = cropInfo
-        pixelatedPreviewImage = ScreenshotEditorRenderer.makePixelatedPreviewImage(for: image)
+        pixelatedPreviewImage = nil
+        Task.detached(priority: .userInitiated) {
+            let pixelated = ScreenshotEditorRenderer.makePixelatedPreviewImage(for: image)
+            await MainActor.run { [weak self] in
+                self?.pixelatedPreviewImage = pixelated
+            }
+        }
     }
 
     var canUndo: Bool {
@@ -434,8 +444,14 @@ private final class ScreenshotEditorViewModel: ObservableObject {
 
         let newImage = NSImage(cgImage: croppedCG, size: newRect.size)
         image = newImage
-        pixelatedPreviewImage = ScreenshotEditorRenderer.makePixelatedPreviewImage(for: newImage)
+        pixelatedPreviewImage = nil
         annotations.removeAll()
+        Task.detached(priority: .userInitiated) {
+            let pixelated = ScreenshotEditorRenderer.makePixelatedPreviewImage(for: newImage)
+            await MainActor.run { [weak self] in
+                self?.pixelatedPreviewImage = pixelated
+            }
+        }
     }
 
     func showToast(_ message: String) {
@@ -697,11 +713,31 @@ private struct ScreenshotEditorRootView: View {
     @FocusState private var isTextFieldFocused: Bool
     @State private var showToolShortcuts: Bool = false
 
+    @State private var currentImageRect: CGRect
     @State private var cropAdjustRect: CGRect?
     @State private var isCropDragging = false
     @State private var cropDragEdge: CropEdge?
     @State private var cropDragStart: CGPoint?
     @State private var cropOriginalRect: CGRect?
+
+    init(
+        viewModel: ScreenshotEditorViewModel,
+        layout: ScreenshotEditorLayout,
+        onClose: @escaping () -> Void,
+        onDone: @escaping () -> Void,
+        onPin: @escaping () -> Void,
+        onSave: @escaping () -> Void,
+        onExtractText: @escaping () -> Void
+    ) {
+        self.viewModel = viewModel
+        self.layout = layout
+        self.onClose = onClose
+        self.onDone = onDone
+        self.onPin = onPin
+        self.onSave = onSave
+        self.onExtractText = onExtractText
+        _currentImageRect = State(initialValue: layout.imageRect)
+    }
 
     private let rectangleLineWidth: CGFloat = 4
     private let arrowLineWidth: CGFloat = 4
@@ -713,19 +749,23 @@ private struct ScreenshotEditorRootView: View {
     private let cropHandleHitTolerance: CGFloat = 10
 
     private var currentDisplayScale: CGFloat {
-        max(layout.imageRect.width / max(viewModel.image.size.width, 1), 0.01)
+        max(currentImageRect.width / max(viewModel.image.size.width, 1), 0.01)
+    }
+
+    private var displayImageRect: CGRect {
+        isCropDragging ? (cropAdjustRect ?? currentImageRect) : currentImageRect
     }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             ScreenshotEditorBackdropView(
                 screenSize: layout.screenSize,
-                imageRect: isCropDragging ? (cropAdjustRect ?? layout.imageRect) : layout.imageRect
+                imageRect: displayImageRect
             )
 
             imageStage
-                .frame(width: layout.imageRect.width, height: layout.imageRect.height)
-                .offset(x: layout.imageRect.minX, y: layout.imageRect.minY)
+                .frame(width: currentImageRect.width, height: currentImageRect.height)
+                .offset(x: currentImageRect.minX, y: currentImageRect.minY)
                 .opacity(isCropDragging ? 0.3 : 1)
 
             if isCropDragging, let adjustRect = cropAdjustRect, let fullImg = viewModel.cropInfo?.fullScreenImage {
@@ -793,20 +833,20 @@ private struct ScreenshotEditorRootView: View {
     private var imageStage: some View {
         ZStack(alignment: .topLeading) {
             Color.clear
-                .frame(width: layout.imageRect.width, height: layout.imageRect.height)
+                .frame(width: currentImageRect.width, height: currentImageRect.height)
 
             if let pixelatedPreviewImage = viewModel.pixelatedPreviewImage,
                hasVisibleMosaicContent {
                 Image(nsImage: pixelatedPreviewImage)
                     .resizable()
                     .interpolation(.none)
-                    .frame(width: layout.imageRect.width, height: layout.imageRect.height)
+                    .frame(width: currentImageRect.width, height: currentImageRect.height)
                     .mask(
                         MosaicMaskView(
                             annotations: viewModel.annotations,
                             draftPoints: draftMosaicPoints,
                             imageSize: viewModel.image.size,
-                            displaySize: layout.imageRect.size
+                            displaySize: currentImageRect.size
                         )
                     )
             }
@@ -828,7 +868,7 @@ private struct ScreenshotEditorRootView: View {
 
     private var selectionChrome: some View {
         SelectionFrameChromeView(
-            size: layout.imageRect.size,
+            size: currentImageRect.size,
             borderColor: Self.selectionFrameColor
         )
     }
@@ -910,7 +950,7 @@ private struct ScreenshotEditorRootView: View {
                 )
             }
         }
-        .frame(width: layout.imageRect.width, height: layout.imageRect.height)
+        .frame(width: currentImageRect.width, height: currentImageRect.height)
     }
 
     private var toolbar: some View {
@@ -1316,6 +1356,7 @@ private struct ScreenshotEditorRootView: View {
                 let origin = clampedTextOrigin(for: value.location)
                 draftTextOrigin = origin
                 draftText = ""
+                viewModel.hasActiveTextDraft = true
                 DispatchQueue.main.async {
                     isTextFieldFocused = true
                 }
@@ -1446,7 +1487,7 @@ private struct ScreenshotEditorRootView: View {
             .foregroundStyle(viewModel.selectedColor.swiftUIColor)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .frame(width: min(240, layout.imageRect.width - 24), alignment: .leading)
+            .frame(width: min(240, currentImageRect.width - 24), alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color.black.opacity(0.76))
@@ -1456,8 +1497,8 @@ private struct ScreenshotEditorRootView: View {
                     .stroke(Color.white.opacity(0.18), lineWidth: 1)
             )
             .position(
-                x: min(origin.x + 120, layout.imageRect.width - 120),
-                y: min(origin.y + 18, layout.imageRect.height - 18)
+                x: min(origin.x + 120, currentImageRect.width - 120),
+                y: min(origin.y + 18, currentImageRect.height - 18)
             )
             .focused($isTextFieldFocused)
             .onSubmit {
@@ -1505,6 +1546,7 @@ private struct ScreenshotEditorRootView: View {
             self.draftTextOrigin = nil
             draftText = ""
             isTextFieldFocused = false
+            viewModel.hasActiveTextDraft = false
         }
 
         let trimmedText = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1529,13 +1571,14 @@ private struct ScreenshotEditorRootView: View {
         draftTextOrigin = nil
         draftText = ""
         isTextFieldFocused = false
+        viewModel.hasActiveTextDraft = false
     }
 
     // MARK: - Crop Adjustment
 
     private var cropHandleOverlay: some View {
         CropHandleHitView(
-            rect: isCropDragging ? (cropAdjustRect ?? layout.imageRect) : layout.imageRect,
+            rect: isCropDragging ? (cropAdjustRect ?? currentImageRect) : currentImageRect,
             tolerance: cropHandleHitTolerance
         )
         .gesture(cropDragGesture)
@@ -1548,7 +1591,7 @@ private struct ScreenshotEditorRootView: View {
             .onChanged { value in
                 let point = value.startLocation
                 if cropDragEdge == nil {
-                    let targetRect = isCropDragging ? (cropAdjustRect ?? layout.imageRect) : layout.imageRect
+                    let targetRect = isCropDragging ? (cropAdjustRect ?? currentImageRect) : currentImageRect
                     cropDragEdge = cropEdge(at: point, in: targetRect)
                     cropDragStart = point
                     cropOriginalRect = targetRect
@@ -1566,6 +1609,7 @@ private struct ScreenshotEditorRootView: View {
             .onEnded { _ in
                 if let finalRect = cropAdjustRect {
                     applyCropAdjustment(finalRect)
+                    currentImageRect = finalRect
                 }
                 cropDragEdge = nil
                 cropDragStart = nil
@@ -1670,15 +1714,15 @@ private struct ScreenshotEditorRootView: View {
 
     private func clampedDisplayPoint(for point: CGPoint) -> CGPoint {
         CGPoint(
-            x: min(max(point.x, 0), layout.imageRect.width),
-            y: min(max(point.y, 0), layout.imageRect.height)
+            x: min(max(point.x, 0), currentImageRect.width),
+            y: min(max(point.y, 0), currentImageRect.height)
         )
     }
 
     private func clampedTextOrigin(for point: CGPoint) -> CGPoint {
         CGPoint(
-            x: min(max(point.x, 12), max(layout.imageRect.width - 228, 12)),
-            y: min(max(point.y, 12), max(layout.imageRect.height - 40, 12))
+            x: min(max(point.x, 12), max(currentImageRect.width - 228, 12)),
+            y: min(max(point.y, 12), max(currentImageRect.height - 40, 12))
         )
     }
 

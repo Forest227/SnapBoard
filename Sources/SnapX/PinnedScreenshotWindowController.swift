@@ -5,7 +5,7 @@ import SwiftUI
 final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelegate {
     private let image: NSImage
     private let onClose: (PinnedScreenshotWindowController) -> Void
-    private var currentScale: CGFloat = 1.0
+    private let scaleModel = PinnedScaleModel()
     private let minScale: CGFloat = 0.25
     private let maxScale: CGFloat = 3.0
 
@@ -43,11 +43,11 @@ final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelega
     }
 
     func zoomIn() {
-        setScale(currentScale * 1.2)
+        setScale(scaleModel.scale * 1.2)
     }
 
     func zoomOut() {
-        setScale(currentScale / 1.2)
+        setScale(scaleModel.scale / 1.2)
     }
 
     func resetZoom() {
@@ -56,15 +56,15 @@ final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelega
 
     private func setScale(_ scale: CGFloat) {
         let newScale = min(max(scale, minScale), maxScale)
-        guard newScale != currentScale else { return }
+        guard newScale != scaleModel.scale else { return }
 
-        currentScale = newScale
+        scaleModel.scale = newScale
 
         guard let window = window else { return }
 
         let imageSize = image.size
-        let newWidth = imageSize.width * currentScale + 24
-        let newHeight = imageSize.height * currentScale + 24
+        let newWidth = imageSize.width * newScale + 24
+        let newHeight = imageSize.height * newScale + 24
 
         let currentFrame = window.frame
         let newSize = CGSize(width: max(newWidth, 220), height: max(newHeight, 160))
@@ -81,18 +81,6 @@ final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelega
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             window.animator().setFrame(newFrame, display: true)
         })
-
-        if let hostingView = window.contentView as? NSHostingView<PinnedScreenshotView> {
-            hostingView.rootView = PinnedScreenshotView(
-                image: image,
-                scale: currentScale,
-                onCopy: { [weak self] in self?.copyImage() },
-                onClose: { [weak window] in window?.performClose(nil) },
-                onZoomIn: { [weak self] in self?.zoomIn() },
-                onZoomOut: { [weak self] in self?.zoomOut() },
-                onResetZoom: { [weak self] in self?.resetZoom() }
-            )
-        }
     }
 
     private func configureWindow(_ window: NSWindow, initialSize: CGSize) {
@@ -113,7 +101,7 @@ final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelega
 
         let rootView = PinnedScreenshotView(
             image: image,
-            scale: currentScale,
+            scaleModel: scaleModel,
             onCopy: { [weak self] in self?.copyImage() },
             onClose: { [weak window] in window?.performClose(nil) },
             onZoomIn: { [weak self] in self?.zoomIn() },
@@ -135,7 +123,6 @@ final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelega
                 return event
             }
 
-            // Check if mouse is over this window
             let mouseLocation = NSEvent.mouseLocation
             let windowFrame = window.frame
             guard windowFrame.contains(mouseLocation) else {
@@ -191,9 +178,14 @@ final class PinnedScreenshotWindowController: NSWindowController, NSWindowDelega
     }
 }
 
+@MainActor
+private final class PinnedScaleModel: ObservableObject {
+    @Published var scale: CGFloat = 1.0
+}
+
 private struct PinnedScreenshotView: View {
     let image: NSImage
-    let scale: CGFloat
+    @ObservedObject var scaleModel: PinnedScaleModel
     let onCopy: () -> Void
     let onClose: () -> Void
     let onZoomIn: () -> Void

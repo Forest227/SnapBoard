@@ -115,11 +115,7 @@ private struct HistoryView: View {
     }
 
     private func deleteSelected() {
-        selectedIDs.forEach { id in
-            if let item = history.items.first(where: { $0.id == id }) {
-                history.remove(item)
-            }
-        }
+        history.removeAll { selectedIDs.contains($0.id) }
         selectedIDs.removeAll()
     }
 
